@@ -144,7 +144,7 @@ Firmware-side libraries, target-agnostic `no_std` so their tests run natively:
 | `vcpu` | Turning SVM on and running a guest on one processor |
 | `vlapic` | The interrupt controller a guest sees in place of the machine's |
 | `drivers/nvme` | The storage driver answering a guest's identify commands |
-| `drivers/ethernet` | The network driver answering a guest's reads of its interfaces' MAC addresses (Intel and Realtek); not yet wired into `hv-core` |
+| `drivers/ethernet` | The network driver answering a guest's reads of its interfaces' MAC addresses (Intel and Realtek), taken over alongside NVMe |
 
 Host-side tooling:
 
