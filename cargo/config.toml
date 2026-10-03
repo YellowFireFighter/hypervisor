@@ -1,0 +1,19 @@
+# No workspace-wide default target is set: the two UEFI applications pin
+# `x86_64-unknown-uefi` themselves via `forced-target` in their manifests
+# (nightly `per-package-target` feature) and pull the library crates in as
+# UEFI dependencies, while the libraries and `xtask` build for the host —
+# so firmware and host-side builds coexist under a plain `cargo build`, and
+# `cargo test -p <crate>` runs natively.
+
+[alias]
+xtask = "run --package xtask --"
+
+# Resolve features per package instead of workspace-wide. Host-side and UEFI
+# crates share dependencies (e.g. `bitflags`), and workspace-wide unification
+# would let host crates switch `std` features on for the `no_std` firmware
+# builds.
+[unstable]
+feature-unification = true
+
+[resolver]
+feature-unification = "package"
