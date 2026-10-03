@@ -1,0 +1,209 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/acpi",
+    "crates/apic",
+    "crates/clock",
+    "crates/config",
+    "crates/cpu",
+    "crates/descriptors",
+    "crates/drivers/ethernet",
+    "crates/drivers/nvme",
+    "crates/handoff",
+    "crates/hv-core",
+    "crates/hv-loader",
+    "crates/hypercall",
+    "crates/inject",
+    "crates/ipi",
+    "crates/memory",
+    "crates/npt",
+    "crates/paging",
+    "crates/partition",
+    "crates/pci",
+    "crates/portal",
+    "crates/probe",
+    "crates/processor",
+    "crates/serial",
+    "crates/snapshot",
+    "crates/spoof",
+    "crates/svm",
+    "crates/uacpi-sys",
+    "crates/vcpu",
+    "crates/vlapic",
+    "crates/xtask",
+    "tools/apic-dump",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# rust-osdev UEFI bindings. `panic_handler` and `global_allocator` install the
+# crate's own handlers so `hv-loader` needs no boilerplate of its own. The
+# `logger` feature stays off: it would claim the global `log` slot that the
+# serial backend owns.
+uefi = { version = "0.39.0", features = ["alloc", "panic_handler", "global_allocator"] }
+
+# The same bindings without any of the runtime: `uefi-raw` is what `uefi` is
+# built on, and it installs neither a panic handler nor a global allocator.
+# `hv-core` uses it instead of `uefi` because the hypervisor outlives the
+# firmware environment — after the lower half of its address space is gone
+# there is no UEFI left to wrap.
+uefi-raw = "0.15.1"
+
+# Firmware-side pulzar crates. `handoff` is the ABI the loader and the
+# hypervisor image agree on; `paging` is the address-space subsystem both of
+# them drive; `acpi` turns the firmware tables into data the hypervisor owns;
+# `descriptors` owns the processor's own tables and the interrupt entry path;
+# `processor` answers what the processor underneath all of them can do; `clock`
+# turns the machine's counters into time; `cpu` answers which processors the
+# machine has and which one is running; `apic` drives their interrupt
+# controllers and starts them; `ipi` is how one of them reaches another; `svm`
+# states what the processor's virtualization structures look like; `snapshot`
+# is what firmware was running with, read before any of it is overwritten;
+# `npt` is the second set of page tables a guest's memory is described by;
+# `memory` is how anything reaches a guest's memory through them, and `vcpu` is
+# what turns the extension on and runs a guest on one processor, and
+# `partition` is the guest those processors are running; `emulate` decodes an
+# intercepted instruction when hardware cannot provide its following address;
+# `portal` is the only hypervisor memory a guest is ever shown, being the pages
+# firmware is entered at and leaves through, `probe` reaches a model-specific
+# register the machine may not have and reports a refusal rather than taking
+# it, `vlapic` is the interrupt controller a guest sees in place of the
+# machine's own, and `exits` is what every one of a guest's exits means and
+# what the host does about it. `nvme` is the storage driver that answers a
+# guest's identify commands with what `spoof` makes of them, and `ethernet`
+# the network driver that answers a guest's queries for its interfaces'
+# factory addresses the same way — `spoof` being the keyed transform that
+# replaces an identifying string with one of the same shape, and `config`
+# the machine's own choices, the transform's seed among them.
+acpi = { path = "crates/acpi" }
+apic = { path = "crates/apic" }
+clock = { path = "crates/clock" }
+config = { path = "crates/config" }
+cpu = { path = "crates/cpu" }
+descriptors = { path = "crates/descriptors" }
+ethernet = { path = "crates/drivers/ethernet" }
+emulate = { path = "crates/emulate" }
+exits = { path = "crates/exits" }
+handoff = { path = "crates/handoff" }
+# The call a guest makes into this hypervisor, and what comes back. Shared
+# rather than firmware-side: the hypervisor's exit path serves it and a tool
+# running inside the guest issues it, so the crate depends on nothing else here.
+hypercall = { path = "crates/hypercall" }
+inject = { path = "crates/inject" }
+ipi = { path = "crates/ipi" }
+memory = { path = "crates/memory" }
+nvme = { path = "crates/drivers/nvme" }
+npt = { path = "crates/npt" }
+paging = { path = "crates/paging" }
+partition = { path = "crates/partition" }
+pci = { path = "crates/pci" }
+portal = { path = "crates/portal" }
+probe = { path = "crates/probe" }
+processor = { path = "crates/processor" }
+snapshot = { path = "crates/snapshot" }
+spoof = { path = "crates/spoof" }
+svm = { path = "crates/svm" }
+# The ACPI implementation itself, as C compiled out of a pinned submodule.
+# `uacpi-sys` is the boundary and nothing else: `acpi` reads the machine's
+# tables through it, and `hv-core` defines the callbacks it needs from a host,
+# because those are the only part that has to know what machine this is.
+uacpi-sys = { path = "crates/uacpi-sys" }
+vcpu = { path = "crates/vcpu" }
+vlapic = { path = "crates/vlapic" }
+
+# `CPUID` decoding, so no leaf number or feature bit position is written out by
+# hand. No features enabled: the crate is `no_std` as it stands, and the
+# optional ones exist for its own command-line tool.
+raw-cpuid = "11.6"
+
+# Flag sets, for the places a group of related bits is one value: a processor's
+# feature set, a hardware register's fields.
+bitflags = "2.13"
+
+# Packed register layouts, for the places bits are not a set but a struct: a
+# field here, a flag there, reserved bits between them. Declaring the layout
+# once is what keeps a shift and a mask from being written out by hand at every
+# use, and what makes a field that does not fit its register a compile error.
+bitfield-struct = "0.13"
+
+# Firmware-side logging stack: `log` is the facade the binaries log through,
+# `serial` is this workspace's 16550 UART backend behind it, `spin` supplies
+# the no_std locks, `thiserror` derives the error types (default features
+# off: they pull in std), and `x86_64` wraps port I/O and interrupt control.
+log = "0.4"
+serial = { path = "crates/serial" }
+spin = "0.12"
+thiserror = { version = "2.0", default-features = false }
+x86_64 = "0.15"
+
+# Bitmap glyphs for the firmware-side screen backend. The default set covers
+# the printable ASCII range, which is what a log line is; the `unicode` set is
+# this crate's own feature and stays off, and so does `std`: the tables are
+# constants and nothing here allocates.
+font8x8 = { version = "0.3", default-features = false }
+
+# Instruction decoding on the VM-exit path. Only the decoder is built, using
+# iced-x86's no-std table initialization; formatting, encoding and assemblers
+# are not part of the hypervisor image.
+iced-x86 = { version = "1.21", default-features = false, features = [
+    "decoder",
+    "instr_info",
+    "no_std",
+] }
+
+# The allocator `hv-core` installs as its global allocator. Talc keeps its
+# bookkeeping inside the memory it manages and needs nothing from the
+# environment but a span of bytes, which is exactly what a run of frames from
+# the reserved chunk is. No features are enabled: `counters` would add
+# per-allocation accounting on top of what `Talc::reserved` already answers for
+# the one place utilization is reported.
+talc = "5.0.4"
+
+# Build-time dependencies of `uacpi-sys`, and of nothing else. `cc` drives the
+# C compiler over uACPI's sources, and `bindgen` reads the same checked-out
+# headers to produce the declarations for them — which is what keeps the
+# declarations and the compiled code describing one version of uACPI. Both run
+# on the build host, so neither reaches the firmware image.
+bindgen = "0.72"
+cc = "1.4"
+
+# Host-side dependencies, used only by the `xtask` runner.
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+dirs = "6.0"
+ovmf-prebuilt = "0.2.9"
+sha2 = "0.11"
+ureq = "3.3"
+
+# Zero-warnings policy: every rustc warning and all of
+# clippy::pedantic are hard errors. Exceptions only as narrowly scoped
+# `#[expect(..., reason = "...")]` attributes — never blanket downgrades.
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -1 }
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+allow_attributes_without_reason = "deny"
+
+# The hypervisor is a dozen crates and its hottest path crosses most of them: a
+# guest's exit is answered by code in `exits` reading structures defined in
+# `svm` through accessors in `vcpu`. Cargo's default release settings optimize
+# each crate on its own, which leaves every one of those boundaries a call —
+# including calls that exist only to return a field or to test a feature bit
+# that was decided at boot. Whole-program optimization is what lets them fold,
+# and a single codegen unit is what lets it see all of them at once.
+#
+# The cost is build time on a clean release build, which is paid by whoever
+# measures rather than by whoever develops: the default profile is untouched.
+[profile.release]
+lto = "fat"
+codegen-units = 1
