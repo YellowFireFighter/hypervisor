@@ -223,7 +223,7 @@ pub enum EthernetError {
 /// reached it, so a straddling access keeps the hardware's answer for the
 /// bytes outside the replacement and takes the replacement's for the bytes
 /// inside.
-fn overlaid(access: Read<'_>, replacement: &[u8], at: u64) -> Data {
+fn overlaid(access: &Read<'_>, replacement: &[u8], at: u64) -> Data {
     let width = access.width();
     let mut bytes = [0_u8; 16];
     if let Some(real) = access.hardware() {
@@ -232,11 +232,12 @@ fn overlaid(access: Read<'_>, replacement: &[u8], at: u64) -> Data {
     }
     for position in 0..width.bytes() {
         let absolute = access.offset() + position as u64;
-        if absolute >= at {
-            let within = (absolute - at) as usize;
-            if within < replacement.len() {
-                bytes[position] = replacement[within];
-            }
+        if let Some(&byte) = absolute
+            .checked_sub(at)
+            .and_then(|within| usize::try_from(within).ok())
+            .and_then(|within| replacement.get(within))
+        {
+            bytes[position] = byte;
         }
     }
     match width {

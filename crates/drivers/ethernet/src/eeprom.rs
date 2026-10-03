@@ -71,18 +71,16 @@ pub(crate) struct Serial {
     words: Box<[u16]>,
     /// How many bits of a command name a word.
     address_bits: u32,
-    /// One transaction's progress. Locked rather than atomic because
-    /// nothing on the packet path touches it: a driver walks this protocol
-    /// a handful of times per boot, on one processor, holding its own lock
-    /// around the whole walk.
-    progress: Mutex<Progress>,
+    /// The transaction under way, or `None` while the chip is not
+    /// selected. Locked rather than atomic because nothing on the packet
+    /// path touches it: a driver walks this protocol a handful of times per
+    /// boot, on one processor, holding its own lock around the whole walk.
+    progress: Mutex<Option<Transaction>>,
 }
 
-/// Where one transaction has got to.
+/// Where a transaction under way has got to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Progress {
-    /// Whether the chip is selected.
-    selected: bool,
+struct Transaction {
     /// The clock's level at the last write.
     clock: bool,
     /// How many command bits have been latched.
@@ -100,24 +98,20 @@ struct Progress {
     output: bool,
 }
 
-impl Progress {
-    /// No transaction under way.
-    const IDLE: Self = Self {
-        selected: false,
-        clock: false,
-        latched: 0,
-        command: 0,
-        reading: false,
-        word: 0,
-        served: 0,
-        output: false,
-    };
-
-    /// A transaction beginning: selected, nothing latched, nothing driven.
-    const BEGIN: Self = Self {
-        selected: true,
-        ..Self::IDLE
-    };
+impl Transaction {
+    /// A transaction beginning with the clock at `clock`: nothing latched,
+    /// nothing driven.
+    const fn begin(clock: bool) -> Self {
+        Self {
+            clock,
+            latched: 0,
+            command: 0,
+            reading: false,
+            word: 0,
+            served: 0,
+            output: false,
+        }
+    }
 }
 
 impl Serial {
@@ -127,7 +121,7 @@ impl Serial {
         Self {
             words: words.into_boxed_slice(),
             address_bits,
-            progress: Mutex::new(Progress::IDLE),
+            progress: Mutex::new(None),
         }
     }
 
@@ -145,41 +139,40 @@ impl Serial {
             // Dropping the select is the one way a transaction ends, and it
             // ends it completely: the real chip forgets the half-latched
             // command, and the next transaction starts from nothing.
-            *progress = Progress::IDLE;
+            *progress = None;
             return;
         }
-        if !progress.selected {
+        let Some(transaction) = progress.as_mut() else {
             // A transaction begins with the select rising, and the write
             // that raises it counts as no clock even if it sets the clock
             // bit too: no driver does that, and the real chip's select
             // dominates its clock.
-            *progress = Progress::BEGIN;
-            progress.clock = clock;
+            *progress = Some(Transaction::begin(clock));
             return;
-        }
-        let rising = clock && !progress.clock;
-        progress.clock = clock;
+        };
+        let rising = clock && !transaction.clock;
+        transaction.clock = clock;
         if !rising {
             return;
         }
         let bits = command_bits(self.address_bits);
-        if progress.latched < bits {
-            progress.command = progress.command << 1 | u32::from(input);
-            progress.latched += 1;
-            if progress.latched == bits {
-                self.decode(&mut progress);
+        if transaction.latched < bits {
+            transaction.command = transaction.command << 1 | u32::from(input);
+            transaction.latched += 1;
+            if transaction.latched == bits {
+                self.decode(transaction);
             }
-        } else if progress.reading {
+        } else if transaction.reading {
             // The bit a driver reads after this clock is the next bit of
             // the word, most significant first. Sixteen of them exhaust a
             // word; the real chip then serves the next address's, so an
             // over-long read gets the same rotation out of this one.
-            let word = self.words[progress.word];
-            progress.output = word >> (15 - progress.served.min(15)) & 1 == 1;
-            progress.served += 1;
-            if progress.served == 16 {
-                progress.word = progress.word + 1 & (self.words.len() - 1);
-                progress.served = 0;
+            let word = self.words[transaction.word];
+            transaction.output = word >> (15 - transaction.served.min(15)) & 1 == 1;
+            transaction.served += 1;
+            if transaction.served == 16 {
+                transaction.word = (transaction.word + 1) & (self.words.len() - 1);
+                transaction.served = 0;
             }
         }
     }
@@ -192,17 +185,19 @@ impl Serial {
     /// is this EEPROM's, never the hardware's, or the words the driver
     /// shifted out would be the real ones.
     pub(crate) fn drives(&self) -> Option<bool> {
-        let progress = self.progress.lock();
-        progress.selected.then_some(progress.output)
+        self.progress
+            .lock()
+            .as_ref()
+            .map(|transaction| transaction.output)
     }
 
     /// Latches the end of a command and begins answering it.
-    fn decode(&self, progress: &mut Progress) {
-        let address = progress.command & (1 << self.address_bits) - 1;
-        progress.reading = progress.command >> self.address_bits & 0xF == READ;
-        progress.word = (address as usize) & (self.words.len() - 1);
-        progress.served = 0;
-        progress.output = false;
+    fn decode(&self, transaction: &mut Transaction) {
+        let address = transaction.command & ((1 << self.address_bits) - 1);
+        transaction.reading = transaction.command >> self.address_bits & 0xF == READ;
+        transaction.word = (address as usize) & (self.words.len() - 1);
+        transaction.served = 0;
+        transaction.output = false;
     }
 }
 

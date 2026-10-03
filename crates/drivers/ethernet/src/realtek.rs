@@ -134,7 +134,7 @@ pub(crate) fn take(
         device: Box::new(File {
             mac: replacement,
             serial,
-            file: within,
+            start: within,
         }),
     })
 }
@@ -176,16 +176,7 @@ unsafe fn read_mac(file: VirtAddr) -> mac::Mac {
     unsafe {
         let low = file.as_u64() as *const u32;
         let high = (file + 4).as_u64() as *const u32;
-        let low = low.read_volatile();
-        let high = high.read_volatile();
-        mac::Mac::new([
-            low as u8,
-            (low >> 8) as u8,
-            (low >> 16) as u8,
-            (low >> 24) as u8,
-            high as u8,
-            (high >> 8) as u8,
-        ])
+        mac::Mac::from_registers(low.read_volatile(), high.read_volatile())
     }
 }
 
@@ -232,7 +223,7 @@ struct File {
     /// The EEPROM the guest shifts words out of, if the hardware has one.
     serial: Option<eeprom::Serial>,
     /// Where the register file starts within this page.
-    file: u64,
+    start: u64,
 }
 
 impl Device for File {
@@ -248,21 +239,21 @@ impl Device for File {
     }
 
     fn read(&self, access: Read<'_>) -> Data {
-        let address = self.file + ADDRESS;
+        let address = self.start + ADDRESS;
         if (address..address + 8).contains(&access.offset()) {
             // The address registers: the replacement's six bytes where the
             // access touches them, and the hardware's two bytes of padding
             // that follow.
-            return overlaid(access, &self.mac.bytes(), address);
+            return overlaid(&access, &self.mac.bytes(), address);
         }
-        let control = self.file + CONTROL;
+        let control = self.start + CONTROL;
         if access.offset() <= control && control < access.offset() + access.width().span() {
             // The control byte, with its data-out bit carrying what the
             // served EEPROM drives. While no transaction is under way the
             // bit is the hardware's own, which is the honest answer for a
             // chip that is not selected.
             if let Some(serial) = &self.serial {
-                return patched(access, control, serial.drives());
+                return patched(&access, control, serial.drives());
             }
         }
         // Everything else on the page — the interrupt, transmit and
@@ -274,10 +265,10 @@ impl Device for File {
     }
 
     fn write(&self, access: Write<'_>) -> Commit {
-        if let Some(serial) = &self.serial {
-            if let Some(byte) = names(&access, self.file + CONTROL) {
-                serial.wrote(byte);
-            }
+        if let Some(serial) = &self.serial
+            && let Some(byte) = names(&access, self.start + CONTROL)
+        {
+            serial.wrote(byte);
         }
         // Everything the guest writes is the hardware's to take: the
         // address registers themselves when a driver programs the address
@@ -293,7 +284,7 @@ impl Device for File {
 ///
 /// The bit is the low bit of the control byte, wherever that byte falls
 /// inside the width the guest read.
-fn patched(access: Read<'_>, at: u64, driven: Option<bool>) -> Data {
+fn patched(access: &Read<'_>, at: u64, driven: Option<bool>) -> Data {
     let mut value = access.hardware().map_or(0, |real| real.as_u64());
     let bit = 1 << (8 * (at - access.offset()));
     match driven {
@@ -317,29 +308,16 @@ fn names(access: &Write<'_>, at: u64) -> Option<u8> {
     Some((access.value().as_u64() >> (8 * (at - first))) as u8)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{ADDRESS, CONTROL, IDENTITY, NARROW, PAGE, REGISTERS, WIDE};
-
-    #[test]
-    fn the_identity_sits_inside_the_register_file() {
-        assert!(ADDRESS + 8 <= REGISTERS);
-        assert!(CONTROL < REGISTERS);
-        assert!(REGISTERS <= PAGE);
-    }
-
-    #[test]
-    fn the_identity_words_are_three() {
-        assert_eq!(
-            crate::mac::Mac::new([1, 2, 3, 4, 5, 6]).nvm_words().len(),
-            3
-        );
-        assert!(IDENTITY + 3 <= 1 << NARROW);
-        assert!(IDENTITY + 3 <= 1 << WIDE);
-    }
-
-    #[test]
-    fn the_wider_addressing_covers_the_narrower_ones_words() {
-        assert!(WIDE > NARROW);
-    }
-}
+const _: () = assert!(
+    ADDRESS + 8 <= REGISTERS && CONTROL < REGISTERS && REGISTERS <= PAGE,
+    "the address registers and the control byte must sit inside the register \
+     file, and the register file inside the one page trapped"
+);
+const _: () = assert!(
+    IDENTITY + 3 <= 1 << NARROW,
+    "the address's three words must fit in the narrower EEPROM, and so in both"
+);
+const _: () = assert!(
+    WIDE > NARROW,
+    "the wider addressing must cover the narrower one's words"
+);
