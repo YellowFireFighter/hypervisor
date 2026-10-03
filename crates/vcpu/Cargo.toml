@@ -1,0 +1,17 @@
+[package]
+name = "vcpu"
+description = "Enabling AMD's virtualization extension, and running a guest on one processor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+log = { workspace = true }
+paging = { workspace = true }
+processor = { workspace = true }
+svm = { workspace = true }
+thiserror = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

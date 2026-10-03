@@ -1,0 +1,433 @@
+//! What a write to the base register does to the controller behind it.
+//!
+//! [`super::ApicBase`] decides whether a write is one the architecture allows;
+//! this is what the controller does about one that is. The three answers are
+//! the three the architecture distinguishes, and the difference between them is
+//! what survives: a write naming the state already held changes nothing, moving
+//! between the faces or switching a disabled controller on keeps the whole
+//! register file, and switching an enabled one off is a lifecycle boundary that
+//! leaves the file as reset leaves it — which is why the physical hardware
+//! behind it has to be brought across before anything virtual moves.
+
+use core::sync::atomic::Ordering;
+
+use thiserror::Error;
+use x86_64::instructions::interrupts;
+
+use crate::{
+    hardware::{model::Model, sources, timer},
+    lifecycle::ledger::Debts,
+    registers::{
+        Vlapic,
+        base::{ApicBase, BOOTSTRAP, GLOBAL_ENABLE, Mode, RESERVED_LOW, X2APIC_ENABLE},
+    },
+};
+
+impl Vlapic {
+    /// Which face the guest is reaching this controller through.
+    pub(crate) fn mode(&self) -> Mode {
+        self.base().mode()
+    }
+
+    /// The base register as it stands.
+    pub(crate) fn base(&self) -> ApicBase {
+        ApicBase::from_bits(self.base.load(Ordering::Acquire))
+    }
+
+    /// Takes a write to the base register, and says what it became.
+    ///
+    /// Which transition it is decides everything below, and [`resets`] is the
+    /// one statement of which of them throws the register file away.
+    ///
+    /// Entering x2APIC from the older face preserves everything the
+    /// architecture says it preserves — the priorities, what is requested and
+    /// in service, the table, the errors — because a guest doing it is
+    /// changing how it addresses its controller and not asking for a new
+    /// one. So the machine behind those registers is preserved too, and
+    /// deliberately: a timer that is counting goes on counting, an armed
+    /// deadline stays armed, and every acknowledgement real hardware is
+    /// owed stays owed, because the entries and the in-service bits that
+    /// make sense of all three survive the write. Quieting them here would
+    /// take away a timer the guest is entitled to keep and an appointment
+    /// it cannot re-derive.
+    ///
+    /// Switching a controller on preserves it too, for a different reason:
+    /// there is nothing there to clear. What a guest gets back is the file
+    /// the disable left at reset, plus whatever reached it while it was off
+    /// — which is a non-maskable interrupt another processor sent it and an
+    /// error a remote sender recorded against it, both of which are
+    /// delivered to a controller whatever its mode and neither of which the
+    /// enable is entitled to discard.
+    ///
+    /// Switching one off is the other thing entirely, and leaves the register
+    /// file as reset leaves it. There the physical hardware has to be dealt
+    /// with: an entry left armed goes on delivering into a controller the guest
+    /// believes is switched off, and every acknowledgement real hardware is
+    /// owed has to be accounted for, because what the guest would have
+    /// discharged it through is exactly what the reset deletes.
+    ///
+    /// # What another processor sees part-way through
+    ///
+    /// Every store below is this processor's, and a processor delivering into
+    /// this controller reads them without any lock. The one that matters is the
+    /// base register, because the face it names decides how a remote processor
+    /// reads everything else — so the interval between publishing it and
+    /// clearing the logical destination beside it is an interval in which
+    /// the two do not describe the same controller.
+    ///
+    /// It is harmless in the order below, and the order is the reason. A remote
+    /// decision takes one snapshot of this register and reads the logical
+    /// destination in the face that snapshot names, so a reader that saw the
+    /// new face computes the identifier x2APIC derives and never looks at
+    /// the stored word being cleared, while one that saw the old face reads
+    /// the stored word — either firmware's or a zero, both of which are
+    /// values the older face legitimately holds. Clearing first would only
+    /// move that interval, not close it: what closes it is the snapshot,
+    /// which is [`crate::delivery`]'s. A logically addressed interrupt sent
+    /// to a controller in the middle of the transition can still be
+    /// dropped, and that is the architecture's window rather than this
+    /// one's — the register it was matched against is being replaced by one
+    /// the guest has not written yet.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the transition refused: a reserved bit, a state that cannot
+    /// be reached from this one, or the wider face on a machine that has none
+    /// to give — see [`BaseFault`], which names which of the two rules
+    /// about that face refused it.
+    pub(crate) fn write_base(&self, value: u64) -> Result<Transition, BaseFault> {
+        let current = self.base();
+        let next = current.written(value, self.model)?;
+        let (from, to) = (current.mode(), next.mode());
+        // The wider face is entered only where the machine can drive it: a
+        // controller offered a face its acceleration cannot follow is one the
+        // guest believes accelerated at exactly the moments it is not, and a
+        // guest that was never told the face exists is owed the same answer
+        // its own architecture gives for reaching for a feature it has none
+        // of. The check the processor's own report provides sits in
+        // [`ApicBase::written`]; this one is the policy's.
+        if let Some(refused) = offered(from, to, crate::avic::activation::x2avic_permitted()) {
+            return Err(refused);
+        }
+        if from == to {
+            // Not a transition. Software that reads the register, changes a
+            // field it is entitled to and writes it back has asked for nothing
+            // to happen, and nothing does.
+            self.base.store(next.bits(), Ordering::Release);
+            return Ok(Transition::Unchanged);
+        }
+        if resets(from, to) {
+            return Ok(self.switched_off(next));
+        }
+        self.base.store(next.bits(), Ordering::Release);
+        if to == Mode::X2Apic {
+            // The two exceptions the architecture names. The logical destination
+            // stops being stored at all — x2APIC derives it from the identifier
+            // — and the destination half of the command register has no
+            // equivalent to carry over.
+            self.logical_destination.store(0, Ordering::Release);
+            self.command
+                .store(self.command().low().into(), Ordering::Release);
+        }
+        Ok(Transition::Preserved)
+    }
+
+    /// Switches the controller off, which is the one transition that throws the
+    /// register file away.
+    ///
+    /// The sources are quieted before anything virtual moves, because one left
+    /// armed can deliver into whatever comes next.
+    ///
+    /// The write, the reset and the settlement are one step, with this
+    /// processor's interrupts held off for all three, and the settlement is
+    /// last. An arrival taken between a settlement and a reset is accepted into
+    /// a register file that is about to be wiped: its debt is recorded, the
+    /// request bit that would have led the guest to acknowledge it is deleted,
+    /// and the real controller is left holding a vector with nothing that names
+    /// it. Settling last makes such an arrival one the settlement accounts for,
+    /// and holding interrupts off leaves no interval for it to land in.
+    ///
+    /// The controller the debts are settled against is this processor's, and it
+    /// is this processor's because the write being taken came out of the guest
+    /// running here — the same thing that makes quieting the sources and
+    /// stopping the timer legitimate.
+    fn switched_off(&self, next: ApicBase) -> Transition {
+        let quiet = sources::quiesce(self) & timer::disarm(self);
+        let debts = interrupts::without_interrupts(|| {
+            self.base.store(next.bits(), Ordering::Release);
+            self.reset_registers();
+            self.ledger.settle(&apic::local().ok())
+        });
+        Transition::Changed { quiet, debts }
+    }
+}
+
+/// Whether this hypervisor's own delivery policy refuses a face change the
+/// architecture allows, and why.
+///
+/// Pure rather than a condition inside [`Vlapic::write_base`], because it is a
+/// rule of this hypervisor's rather than of the architecture and the one line
+/// an operator gets out of a refused mode entry has to name it as such.
+///
+/// Only a move that goes somewhere is judged. A write naming the face the
+/// controller is already in has asked for nothing, and refusing one would fault
+/// a guest already in a face this machine cannot drive for reading its own
+/// register and writing it back.
+const fn offered(from: Mode, to: Mode, permitted: bool) -> Option<BaseFault> {
+    if !matches!(to, Mode::X2Apic) || matches!(from, Mode::X2Apic) || permitted {
+        return None;
+    }
+    Some(BaseFault::X2ApicNotOffered)
+}
+
+/// Whether moving between these two faces leaves the register file as reset
+/// leaves it.
+///
+/// One statement of which transition is a lifecycle boundary, because getting
+/// it wrong in either direction is a defect: a reset that does not happen
+/// leaves a switched-off controller holding a guest's timer configuration and
+/// its in-service bits, and a reset that happens where the architecture does
+/// not ask for one destroys state the guest is entitled to keep across it.
+///
+/// Only switching an enabled controller off does. Neither of the other two
+/// moves that go anywhere is a reset: entering x2APIC preserves the whole file
+/// by definition, and switching a disabled controller *on* has nothing to clear
+/// — the file was left at reset by the disable that got it there, and what has
+/// accumulated since is state a disabled controller legitimately holds. A
+/// non-maskable interrupt it was sent, and an error a remote sender recorded
+/// against it, are both delivered to a controller whatever its mode, and a
+/// guest that switches its own controller on has not asked to lose either.
+const fn resets(from: Mode, to: Mode) -> bool {
+    matches!(to, Mode::Disabled) && !matches!(from, Mode::Disabled)
+}
+
+/// What a write to the base register did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Transition {
+    /// The write named the state the register was already in, so nothing
+    /// happened and nothing has to be reconciled.
+    Unchanged,
+    /// The controller changed face and kept its register file, which is what
+    /// entering x2APIC preserves and what switching a controller on has nothing
+    /// to discard — so nothing behind it was quieted and there was nothing to
+    /// settle.
+    Preserved,
+    /// The controller was switched off and its register file was reset, so the
+    /// physical hardware behind it was brought across first.
+    Changed {
+        /// Whether every source really was quieted first.
+        quiet: bool,
+        /// What real hardware was left holding for the guest whose controller
+        /// this was.
+        debts: Debts,
+    },
+}
+
+impl ApicBase {
+    /// What this register becomes when the guest writes `value`, or why it may
+    /// not.
+    ///
+    /// The checks run in the order the guest would meet them on real hardware:
+    /// reserved bits first, then the transition.
+    ///
+    /// Two fields of what a guest writes are not the guest's to change and are
+    /// dropped rather than refused. The bootstrap flag is read-only to software
+    /// on real hardware too. The address field is not: it is architecturally
+    /// writable, and ignoring a write to it is this hypervisor's own deviation,
+    /// taken because the page is trapped in the nested page tables once before
+    /// any guest runs and nothing here can re-trap a range while processors are
+    /// executing. Ignoring it leaves a guest that reads the register back
+    /// seeing the address it did not get, and running; raising a fault the
+    /// architecture does not define instead would kill software that writes
+    /// the field wholesale, which is what the usual way of enabling a
+    /// controller from a firmware-supplied address does.
+    ///
+    /// # Errors
+    ///
+    /// [`BaseFault::Reserved`] if any bit the architecture reserves was written
+    /// non-zero, [`BaseFault::IllegalTransition`] if the two enable bits
+    /// name a state this one cannot go to, or
+    /// [`BaseFault::X2ApicUnsupported`] if the wider face was asked for on a
+    /// processor that reports none.
+    pub(crate) fn written(self, value: u64, model: Model) -> Result<Self, BaseFault> {
+        if value & reserved() != 0 {
+            return Err(BaseFault::Reserved);
+        }
+
+        // The two enable bits are the whole of what a guest may change here. The
+        // bootstrap flag is carried through from where it was, and the address is
+        // written as the constant this hypervisor traps rather than as what the
+        // guest asked for — which is what makes the page not moving a property of
+        // this type rather than of every caller, exactly as it is in
+        // `ApicBase::seeded`.
+        let next = Self(
+            (value & (GLOBAL_ENABLE | X2APIC_ENABLE)) | Self::DEFAULT_PAGE | (self.0 & BOOTSTRAP),
+        );
+
+        // Checked against the raw value rather than against `next.mode()`,
+        // which reports a controller with `EXTD` set and `EN` clear as merely
+        // disabled and would let this through as a legal move.
+        if value & X2APIC_ENABLE != 0 && value & GLOBAL_ENABLE == 0 {
+            return Err(BaseFault::IllegalTransition);
+        }
+        // A guest whose `CPUID` says the processor has no x2APIC must not be
+        // able to enter it. `CPUID` is passed through, so this is the real
+        // processor's answer, and a guest allowed to enter a mode its own
+        // feature test denies would be one whose feature tests mean nothing.
+        if value & X2APIC_ENABLE != 0 && !model.x2apic() {
+            return Err(BaseFault::X2ApicUnsupported);
+        }
+        if !permitted(self.mode(), next.mode()) {
+            return Err(BaseFault::IllegalTransition);
+        }
+        Ok(next)
+    }
+}
+
+/// Why a write to `IA32_APIC_BASE` did not take.
+///
+/// Every variant is the same exception as far as the guest is concerned — a
+/// general protection fault — and they are kept apart because the one line an
+/// operator gets out of a refused write is this name. Two of them are the
+/// reasons the *wider face* is refused, and they are two rather than one
+/// because two different rules refuse the same write for reasons an operator
+/// would act on differently: a machine that has no such face at all, and a
+/// machine that has one this hypervisor's delivery policy will not drive.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub(crate) enum BaseFault {
+    /// A bit the architecture reserves was written non-zero: one of the eight
+    /// below the flags, the one between the bootstrap flag and the enables, or
+    /// one above the physical address space this processor implements.
+    #[error("a reserved bit of the apic base register was written non-zero")]
+    Reserved,
+    /// The two enable bits name a state that cannot be reached from the one the
+    /// controller is in, or a combination that is not a state at all.
+    #[error("the apic base register cannot go to that mode from this one")]
+    IllegalTransition,
+    /// The guest asked to enter the wider face on a processor whose own `CPUID`
+    /// says it has none.
+    ///
+    /// The architecture's rule rather than this hypervisor's: `CPUID` is passed
+    /// through, so this is the real processor's answer, and a guest allowed to
+    /// enter a mode its own feature test denies would be one whose feature
+    /// tests mean nothing.
+    #[error("this processor reports no x2apic mode for the apic base register to enter")]
+    X2ApicUnsupported,
+    /// The guest asked to enter the wider face on a machine whose delivery
+    /// policy will not drive it.
+    ///
+    /// This hypervisor's rule. The machine has the mode and the guest was never
+    /// told it does — the feature bit is withheld from the same answer —
+    /// because a controller offered a face the acceleration cannot follow
+    /// is one the guest believes accelerated at exactly the moments it is
+    /// not.
+    #[error("this machine's interrupt delivery policy does not offer the guest x2apic mode")]
+    X2ApicNotOffered,
+}
+
+/// Whether the architecture allows a controller in `from` to be written into
+/// `to`.
+///
+/// Staying put is allowed from everywhere. Of the moves that go somewhere, the
+/// asymmetry is that x2APIC is entered only from the older interface and left
+/// only into disabled: there is no edge from x2APIC back to xAPIC and none from
+/// disabled straight into x2APIC.
+const fn permitted(from: Mode, to: Mode) -> bool {
+    matches!(
+        (from, to),
+        (Mode::Disabled, Mode::Disabled | Mode::XApic)
+            | (Mode::XApic, Mode::XApic | Mode::X2Apic | Mode::Disabled)
+            | (Mode::X2Apic, Mode::X2Apic | Mode::Disabled)
+    )
+}
+
+/// Every bit a write must leave clear.
+fn reserved() -> u64 {
+    RESERVED_LOW | beyond_physical()
+}
+
+/// The bits at and above the width of a physical address on this processor.
+///
+/// The guest is given the machine's own width, so what it may put in the
+/// address field is what the processor would have accepted. A processor
+/// reporting a width of 64 or more would make the shift overflow, and a guest's
+/// register write is not the place to discover that, so an unshiftable width
+/// reserves nothing rather than panicking.
+fn beyond_physical() -> u64 {
+    u64::MAX
+        .checked_shl(u32::from(processor::physical_address_bits()))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Which transition throws the register file away is the one decision in
+    //! this file that can be checked without a controller, and it is the one
+    //! that costs a guest state it is entitled to keep if it is wrong.
+    //!
+    //! Beside it is the rule that is this hypervisor's rather than the
+    //! architecture's: whether the wider face is on offer at all. Two different
+    //! rules refuse the same write, and the whole of what refusing them
+    //! differently buys is the one line an operator gets — so the variants are
+    //! asserted apart.
+
+    use super::{BaseFault, Mode, offered, resets};
+
+    /// Every state, so that a mode cannot be added without a decision here.
+    const STATES: [Mode; 3] = [Mode::Disabled, Mode::XApic, Mode::X2Apic];
+
+    #[test]
+    fn only_switching_an_enabled_controller_off_resets_the_register_file() {
+        for from in STATES {
+            for to in STATES {
+                assert_eq!(
+                    resets(from, to),
+                    to == Mode::Disabled && from != Mode::Disabled,
+                    "{from} to {to}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn switching_a_controller_on_keeps_what_reached_it_while_it_was_off() {
+        // The enable edge, which used to reach the same reset as the two
+        // disabling ones — destroying a non-maskable interrupt another processor
+        // had sent the controller and every error a remote sender had recorded
+        // against it, neither of which a controller has to be enabled to be
+        // given.
+        assert!(!resets(Mode::Disabled, Mode::XApic));
+    }
+
+    #[test]
+    fn the_wider_face_is_refused_by_its_own_rule_where_the_policy_withholds_it() {
+        // Named as the policy's refusal rather than as a reserved bit, because a
+        // write that had no reserved bit set reported as one sends whoever reads
+        // the line looking at the value the guest wrote instead of at this
+        // machine's delivery policy.
+        for from in [Mode::Disabled, Mode::XApic] {
+            assert_eq!(
+                offered(from, Mode::X2Apic, false),
+                Some(BaseFault::X2ApicNotOffered),
+                "{from}"
+            );
+            assert_eq!(offered(from, Mode::X2Apic, true), None, "{from}");
+        }
+    }
+
+    #[test]
+    fn the_policy_refuses_nothing_but_entering_the_wider_face() {
+        // Every other move, under both answers. In particular a controller
+        // already in the wider face may write the register it is in: a machine
+        // that cannot drive that face still has to let a guest already there read
+        // its own register and write it back, and it still has to let it leave.
+        for permitted in [false, true] {
+            for from in STATES {
+                for to in [Mode::Disabled, Mode::XApic] {
+                    assert_eq!(offered(from, to, permitted), None, "{from} to {to}");
+                }
+            }
+            assert_eq!(offered(Mode::X2Apic, Mode::X2Apic, permitted), None);
+        }
+    }
+}

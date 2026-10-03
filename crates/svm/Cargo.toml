@@ -1,0 +1,15 @@
+[package]
+name = "svm"
+description = "AMD secure virtual machine structures, exactly as the architecture lays them out"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bitfield-struct = { workspace = true }
+bitflags = { workspace = true }
+descriptors = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

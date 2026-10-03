@@ -1,0 +1,29 @@
+[package]
+name = "vlapic"
+description = "The local interrupt controller a guest sees, in place of the machine's own"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+apic = { workspace = true }
+bitfield-struct = { workspace = true }
+bitflags = { workspace = true }
+clock = { workspace = true }
+cpu = { workspace = true }
+descriptors = { workspace = true }
+emulate = { workspace = true }
+ipi = { workspace = true }
+log = { workspace = true }
+paging = { workspace = true }
+probe = { workspace = true }
+processor = { workspace = true }
+snapshot = { workspace = true }
+spin = { workspace = true }
+svm = { workspace = true }
+thiserror = { workspace = true }
+vcpu = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true
