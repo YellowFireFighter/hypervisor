@@ -35,6 +35,10 @@ enum Cli {
         /// memory are unaffected and still readable from a debugger.
         #[arg(long)]
         silent: bool,
+        /// Build the loader to start Limine as the guest's boot manager
+        /// instead of Windows', for the Linux demonstration disks.
+        #[arg(long)]
+        limine: bool,
     },
     /// Provision a guest OS disk image (a one-time setup step per machine).
     #[command(subcommand)]
@@ -131,11 +135,31 @@ impl Guest {
             Self::None => "none",
         }
     }
+
+    /// The boot manager the loader starts for this guest: Limine for the
+    /// Linux disks, and the Windows boot manager otherwise.
+    fn chain(self) -> esp::Chain {
+        match self {
+            Self::Linux | Self::Cachyos => esp::Chain::Limine,
+            Self::Windows | Self::None => esp::Chain::Windows,
+        }
+    }
 }
 
 fn main() -> Result<()> {
     match Cli::parse() {
-        Cli::Build { release, silent } => esp::stage(release, silent).map(|_| ()),
+        Cli::Build {
+            release,
+            silent,
+            limine,
+        } => {
+            let chain = if limine {
+                esp::Chain::Limine
+            } else {
+                esp::Chain::Windows
+            };
+            esp::stage(release, silent, chain).map(|_| ())
+        }
         Cli::Disk(DiskCommand::Linux { force }) => disk::linux(force),
         Cli::Disk(DiskCommand::Cachyos { force }) => disk::cachyos(force),
         Cli::Disk(DiskCommand::Windows { iso, force }) => disk::windows(&iso, force),

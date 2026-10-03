@@ -152,7 +152,7 @@ pub fn run(
         )?),
     };
     let esp = match layering {
-        Layering::Hypervisor => Some(esp::stage(release, silent)?),
+        Layering::Hypervisor => Some(esp::stage(release, silent, os.chain())?),
         Layering::Bare => {
             println!("booting {} with no hypervisor in front of it", os.label());
             None

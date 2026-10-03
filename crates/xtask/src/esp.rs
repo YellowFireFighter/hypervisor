@@ -18,6 +18,15 @@ const IMAGES: [(&str, &str, &str); 2] = [
     ("hv-core", "hv-core.efi", "pulzar.efi"),
 ];
 
+/// The boot manager the loader starts as the first guest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chain {
+    /// The Windows boot manager, found on the guest's own system partition.
+    Windows,
+    /// Limine, which the Linux demonstration disks carry.
+    Limine,
+}
+
 /// Compiles the UEFI crates and repopulates `dist/esp/` from scratch,
 /// returning its path.
 ///
@@ -27,7 +36,10 @@ const IMAGES: [(&str, &str, &str); 2] = [
 /// compiled once for the build and either would do it: a flag whose effect
 /// depends on feature unification is one that stops working the moment the
 /// dependency graph changes.
-pub fn stage(release: bool, silent: bool) -> Result<PathBuf> {
+///
+/// `chain` names the boot manager the loader is built to start, which is the
+/// loader's own `limine` feature for [`Chain::Limine`].
+pub fn stage(release: bool, silent: bool, chain: Chain) -> Result<PathBuf> {
     let root = paths::workspace_root();
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut build = Command::new(cargo);
@@ -38,11 +50,18 @@ pub fn stage(release: bool, silent: bool) -> Result<PathBuf> {
     if release {
         build.arg("--release");
     }
+    let mut features: Vec<String> = Vec::new();
     if silent {
-        let features: Vec<String> = IMAGES
-            .iter()
-            .map(|(package, _, _)| format!("{package}/quiet"))
-            .collect();
+        features.extend(
+            IMAGES
+                .iter()
+                .map(|(package, _, _)| format!("{package}/quiet")),
+        );
+    }
+    if chain == Chain::Limine {
+        features.push("hv-loader/limine".to_owned());
+    }
+    if !features.is_empty() {
         build.args(["--features", &features.join(",")]);
     }
     proc::run(&mut build, "it ships with the Rust toolchain")?;

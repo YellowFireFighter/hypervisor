@@ -30,9 +30,10 @@ and nothing placeholder. Below is exactly what is present, and how to run it.
 
 1. Firmware starts `hv-loader` (`EFI/BOOT/BOOTX64.EFI`). It captures the
    state firmware is running with, reserves a 64 MiB chunk of physical memory
-   for the hypervisor, and preloads the guest boot manager
-   (`\EFI\Limine\limine_x64.efi`, searched on every filesystem volume — a
-   missing or ambiguous path refuses the boot rather than guessing).
+   for the hypervisor, loads the hypervisor image from `\pulzar.efi` beside
+   it, and preloads the guest boot manager — Windows' own,
+   `\EFI\Microsoft\Boot\bootmgfw.efi`, searched on every filesystem volume
+   (a missing or ambiguous path refuses the boot rather than guessing).
 2. It captures the memory map, loads and relocates the hypervisor image at a
    randomized high-half address alongside a guarded stack, a direct map of
    physical memory and a mapping window, publishes a `Handoff` describing all
@@ -174,9 +175,16 @@ produces `target/x86_64-unknown-uefi/debug/` and stages the EFI system
 partition as a plain directory under `dist/esp/`, served to QEMU through its
 virtual-FAT driver — no filesystem image is ever built or committed.
 
-The disk a guest OS boots from must carry Limine at
-`\EFI\Limine\limine_x64.efi`: the loader preloads it and the portal starts it
-inside the first guest, and Limine then chainloads the OS.
+The staged partition holds the loader at `EFI/BOOT/BOOTX64.EFI` and the
+hypervisor image at `pulzar.efi`. The loader preloads the Windows boot
+manager from the guest's own system partition and the portal starts it inside
+the first guest, so a Windows disk boots behind pulzar as it is.
+
+For the Linux demonstration disks the loader is built with its `limine`
+feature instead (`cargo xtask build --limine`, and automatically by
+`cargo xtask run --os linux|cachyos`), and preloads Limine from
+`\EFI\Limine\limine_x64.efi`, which the disk must carry and which then
+chainloads the OS.
 
 ### Provision a guest disk (once per machine)
 

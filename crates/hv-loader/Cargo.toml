@@ -46,5 +46,9 @@ quiet = ["serial/quiet"]
 # starts drawing.
 efifb = ["serial/efifb"]
 
+# Starts Limine as the first guest's boot manager instead of Windows', for the
+# Linux disks the demonstrations run.
+limine = []
+
 [lints]
 workspace = true
