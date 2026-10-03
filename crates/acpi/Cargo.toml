@@ -1,0 +1,18 @@
+[package]
+name = "acpi"
+description = "Firmware ACPI tables, cached and parsed for the pulzar hypervisor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+log = { workspace = true }
+thiserror = { workspace = true }
+# The ACPI implementation the machine's table directory is read through. Only
+# the table subsystem is used from here: finding, checking and mapping a table
+# is uACPI's, and reading what is inside one is this crate's.
+uacpi-sys = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

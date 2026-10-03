@@ -1,0 +1,18 @@
+[package]
+name = "clock"
+description = "The hypervisor's timebase: wall-clock time, nanoseconds and delays"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi = { workspace = true }
+log = { workspace = true }
+paging = { workspace = true }
+processor = { workspace = true }
+spin = { workspace = true }
+thiserror = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

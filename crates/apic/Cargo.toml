@@ -1,0 +1,22 @@
+[package]
+name = "apic"
+description = "Local interrupt controllers, and starting the processors behind them"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi = { workspace = true }
+bitflags = { workspace = true }
+clock = { workspace = true }
+cpu = { workspace = true }
+descriptors = { workspace = true }
+log = { workspace = true }
+paging = { workspace = true }
+processor = { workspace = true }
+spin = { workspace = true }
+thiserror = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

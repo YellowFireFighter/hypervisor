@@ -1,0 +1,16 @@
+[package]
+name = "cpu"
+description = "Which processors this machine has, and which one is running"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi = { workspace = true }
+log = { workspace = true }
+spin = { workspace = true }
+thiserror = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true
