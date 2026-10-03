@@ -27,6 +27,7 @@ members = [
     "crates/processor",
     "crates/serial",
     "crates/snapshot",
+    "crates/splash",
     "crates/spoof",
     "crates/svm",
     "crates/uacpi-sys",
@@ -107,6 +108,9 @@ portal = { path = "crates/portal" }
 probe = { path = "crates/probe" }
 processor = { path = "crates/processor" }
 snapshot = { path = "crates/snapshot" }
+# The boot screen, drawn by the loader and the hypervisor image while the host
+# comes up, onto the same frame buffer `serial`'s screen backend logs to.
+splash = { path = "crates/splash" }
 spoof = { path = "crates/spoof" }
 svm = { path = "crates/svm" }
 # The ACPI implementation itself, as C compiled out of a pinned submodule.
