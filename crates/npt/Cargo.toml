@@ -1,0 +1,26 @@
+[package]
+name = "npt"
+description = "The second set of page tables a guest's physical addresses are translated by"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bitflags = { workspace = true }
+# Which processor is asking, so that the table frames a fill takes are the ones
+# that processor set aside rather than a list every one of them contends for.
+cpu = { workspace = true }
+log = { workspace = true }
+paging = { workspace = true }
+processor = { workspace = true }
+spin = { workspace = true }
+svm = { workspace = true }
+thiserror = { workspace = true }
+# The one thing a processor entering a guest has to be told, which is that what
+# it cached of these tables is stale: the field that says so belongs to a control
+# block, and arming it is the entry hook's whole job.
+vcpu = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

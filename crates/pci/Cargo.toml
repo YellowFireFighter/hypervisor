@@ -1,0 +1,19 @@
+[package]
+name = "pci"
+description = "PCI Express configuration space, and the devices behind it"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+acpi = { workspace = true }
+bitfield-struct = { workspace = true }
+bitflags = { workspace = true }
+log = { workspace = true }
+paging = { workspace = true }
+spin = { workspace = true }
+thiserror = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

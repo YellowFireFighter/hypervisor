@@ -1,0 +1,26 @@
+[package]
+name = "partition"
+description = "One guest: the memory it sees, and the tag its cached translations carry"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Which processor is entering the guest or has left it, which is what the nested
+# tables publish so that a change to the guest's memory can find it inside.
+cpu = { workspace = true }
+emulate = { workspace = true }
+log = { workspace = true }
+memory = { workspace = true }
+npt = { workspace = true }
+paging = { workspace = true }
+processor = { workspace = true }
+spin = { workspace = true }
+svm = { workspace = true }
+thiserror = { workspace = true }
+vcpu = { workspace = true }
+vlapic = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

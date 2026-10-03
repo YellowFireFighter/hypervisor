@@ -1,0 +1,16 @@
+[package]
+name = "memory"
+description = "What a guest's addresses mean, and how the hypervisor reaches what is behind them"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+npt = { workspace = true }
+paging = { workspace = true }
+svm = { workspace = true }
+thiserror = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

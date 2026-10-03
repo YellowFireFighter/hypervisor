@@ -1,0 +1,16 @@
+[package]
+name = "portal"
+description = "The guest-callable pages that transfer firmware into the operating system"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+handoff = { workspace = true }
+paging = { workspace = true }
+thiserror = { workspace = true }
+uefi-raw = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true
