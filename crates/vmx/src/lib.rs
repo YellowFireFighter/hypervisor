@@ -40,15 +40,26 @@
 //! - [`support`] decodes whether this machine can enter VMX operation at all,
 //!   from the `CPUID` feature bit and the feature-control register firmware
 //!   locks it behind.
+//! - [`control`] is what the processor does on the guest's behalf and what it
+//!   intercepts, together with the reconciliation against the capability
+//!   registers that every control word must pass.
+//! - [`exit`] is why a guest stopped, and [`event`] is what is handed to it on
+//!   the way back in.
 
 #![no_std]
 
 pub mod basic;
+pub mod control;
+pub mod event;
+pub mod exit;
 pub mod field;
 pub mod support;
 
 pub use crate::{
     basic::VmxBasic,
+    control::{Capability, PinBased, PrimaryProc, SecondaryProc, VmEntry, VmExit},
+    event::Interruption,
+    exit::{BasicExitReason, ExitReason},
     field::{Access, Field, FieldEncoding, Kind, Width},
     support::FeatureControl,
 };
