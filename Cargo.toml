@@ -9,6 +9,8 @@ members = [
     "crates/descriptors",
     "crates/drivers/ethernet",
     "crates/drivers/nvme",
+    "crates/emulate",
+    "crates/exits",
     "crates/handoff",
     "crates/hv-core",
     "crates/hv-loader",
