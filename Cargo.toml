@@ -33,6 +33,7 @@ members = [
     "crates/uacpi-sys",
     "crates/vcpu",
     "crates/vlapic",
+    "crates/vmx",
     "crates/xtask",
     "tools/apic-dump",
 ]
@@ -120,6 +121,9 @@ svm = { path = "crates/svm" }
 uacpi-sys = { path = "crates/uacpi-sys" }
 vcpu = { path = "crates/vcpu" }
 vlapic = { path = "crates/vlapic" }
+# Intel VMX structures and encodings, the counterpart to `svm`. Definitions
+# only: a future VMX backend is built on it as the SVM one is built on `svm`.
+vmx = { path = "crates/vmx" }
 
 # `CPUID` decoding, so no leaf number or feature bit position is written out by
 # hand. No features enabled: the crate is `no_std` as it stands, and the
