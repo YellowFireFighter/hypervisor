@@ -581,6 +581,7 @@ dependencies = [
  "serial",
  "snapshot",
  "spin 0.12.2",
+ "splash",
  "svm",
  "talc",
  "thiserror",

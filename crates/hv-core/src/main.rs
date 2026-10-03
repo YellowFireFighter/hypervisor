@@ -44,6 +44,7 @@ extern crate alloc;
 mod avic;
 mod error;
 mod heap;
+mod screen;
 mod uacpi;
 
 use core::{convert::Infallible, ffi::c_void, hint::black_box, panic::PanicInfo};
@@ -68,7 +69,11 @@ use vcpu::Vcpu;
 use vlapic::Joining;
 use x86_64::{PhysAddr, VirtAddr, structures::paging::PhysFrame};
 
-use crate::{error::CoreError, heap::Heap};
+use crate::{
+    error::CoreError,
+    heap::Heap,
+    screen::{Screen, Step},
+};
 
 /// Bytes of stack the self check writes and reads back after the transition.
 const PROBE_BYTES: usize = 256;
@@ -169,7 +174,7 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     let mut space = unsafe { AddressSpace::adopt(&adopted(handoff)?) }?;
     // Before anything logs, so that what follows lands on the screen where one
     // was offered and taken.
-    attach_screen(&mut space, &handoff.framebuffer);
+    let mut screen = Screen::attach(&mut space, &handoff.framebuffer);
     announce(handoff);
 
     space.describe("core");
@@ -187,6 +192,7 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     // belongs in: it claims a vector, and what it claims it for is a fault the
     // host takes deliberately while answering for a guest.
     probe::install()?;
+    screen.advance(Step::Tables);
 
     // SAFETY: this space is the active one, physical memory is reached through
     // its direct map rather than firmware's identity map, and nothing firmware
@@ -204,6 +210,7 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
 
     let acpi = survey_machine(handoff, &space)?;
     start_clock(&mut space, &acpi, handoff)?;
+    screen.advance(Step::Clock);
 
     // The roster first, because everything below it is sized by how many
     // processors firmware described; then the interrupt controllers, which is
@@ -245,6 +252,7 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     // Running, because this is the processor the guest is entered on. Every
     // other one joins the guest held, however long it has been executing.
     vlapic::claim_processor(here, Joining::Running)?;
+    screen.advance(Step::Interrupts);
 
     // After the block, because enabling virtualization snapshots host state that
     // includes the `GS` base a block is reached through, and before any other
@@ -311,9 +319,11 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     }
     owed = owed.and(partition.interpose(&mut space, [vlapic::region()?])?);
     partition.barrier(owed)?;
+    screen.advance(Step::Partition);
     let mut vcpu = virtualize(&mut space)?;
     seed(&mut vcpu, inherited(handoff)?, portal.entry());
     vcpu.describe("core");
+    screen.advance(Step::Processor);
 
     // Last of the subsystems that take the address space by value, and
     // deliberately so. It maps and releases a range per bus, which costs nothing
@@ -322,6 +332,7 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     // `apic::start` — and it is by far the largest consumer of the mapping
     // window, so everything the machine needs to run has already taken its share.
     Pci::install(&mut space, &acpi)?.describe("core");
+    screen.advance(Step::Devices);
 
     // The last use of the address space as a value. From here it belongs to the
     // machine rather than to this function, and every processor reaches the same
@@ -344,12 +355,14 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
         error!("core: uacpi could not build the machine's namespace: {status}");
     }
     uacpi::describe("core");
+    screen.advance(Step::Namespace);
 
     heap.describe("core");
     cpu::describe("core");
     ipi::describe("core");
     vlapic::describe("core");
     paging::with(|space| self_check(space, handoff))??;
+    screen.advance(Step::Ready);
     // The last thing before the guest, and the only part of the host's own
     // bring-up that is undone: the legacy controllers go back to the masks
     // firmware had left them, because a guest that is firmware drives its own
@@ -360,61 +373,11 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     if apic::restore_legacy(inherited(handoff)?.interrupts.legacy_masks)? {
         info!("core: legacy controllers put back as firmware had masked them");
     }
+    // The boot screen's last frames, and the display handed back blank, before
+    // the guest that draws on it next is entered.
+    screen.hand_over();
     info!("core: host bring-up complete, entering the firmware guest");
     run_guest(&mut vcpu, partition, portal, handoff)
-}
-
-/// Maps the handoff's frame buffer and offers it to the logging backend.
-///
-/// The aperture is device memory, which is why this mapping exists at all: the
-/// direct map covers RAM only. It is mapped `UncachedMinus`, which lets
-/// firmware's MTRRs keep the type they chose for this range — write-combining
-/// where firmware wanted scanout performance, uncached where it did not — and
-/// the translation stands for as long as the machine does, because the writer
-/// on the other side of [`serial::offer_screen`] holds no reference to it that
-/// could go stale.
-///
-/// A machine with no usable screen in its handoff, or one whose aperture will
-/// not map, keeps logging through whatever port answered; neither is worth a
-/// boot.
-fn attach_screen(space: &mut AddressSpace, screen: &handoff::Framebuffer) {
-    #[cfg(feature = "efifb")]
-    {
-        use paging::{CacheType, Protection};
-
-        if !screen.usable() {
-            info!("core: no usable screen in the handoff; logging stays on the ports");
-            return;
-        }
-        let span = u64::from(screen.pitch) * u64::from(screen.height);
-        // SAFETY: the range is device memory firmware itself drew through as a
-        // linear frame buffer, described by firmware's own console mode and
-        // carried verbatim in the handoff; nothing else maps or writes this
-        // aperture; read-write non-executable is what drawing needs; and the
-        // returned handle is dropped without unmapping, which is deliberate —
-        // the translation must outlive every log line.
-        match unsafe {
-            space.map_physical(
-                PhysAddr::new(screen.base),
-                span,
-                Protection::ReadWrite,
-                CacheType::UncachedMinus,
-            )
-        } {
-            Ok(mapping) => {
-                let address = mapping.addr().as_u64();
-                drop(mapping);
-                if serial::offer_screen(screen, address) {
-                    info!("core: logging attached to the frame buffer at {address:#x}");
-                }
-            }
-            Err(error) => warn!("core: the frame buffer would not map: {error}"),
-        }
-    }
-    #[cfg(not(feature = "efifb"))]
-    {
-        let _ = (space, screen);
-    }
 }
 
 /// Enters the guest on the boot processor and stays in its exits until one of
