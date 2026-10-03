@@ -127,16 +127,7 @@ fn original(space: &mut AddressSpace, base: PhysAddr) -> Result<mac::Mac, Ethern
                 // are read whole at their own width.
                 let low = (filters + ADDRESS).as_u64() as *const u32;
                 let high = (filters + ADDRESS + 4).as_u64() as *const u32;
-                let low = low.read_volatile();
-                let high = high.read_volatile();
-                mac::Mac::new([
-                    low as u8,
-                    (low >> 8) as u8,
-                    (low >> 16) as u8,
-                    (low >> 24) as u8,
-                    high as u8,
-                    (high >> 8) as u8,
-                ])
+                mac::Mac::from_registers(low.read_volatile(), high.read_volatile())
             },
         )
     }
@@ -168,7 +159,7 @@ impl Device for Filters {
             // that follow — one of which is the pair's valid bit, which a
             // reset leaves set and a driver that wrote the pair left as it
             // willed.
-            return overlaid(access, &self.mac.bytes(), ADDRESS);
+            return overlaid(&access, &self.mac.bytes(), ADDRESS);
         }
         // Every other register on the page is the hardware's to answer: the
         // multicast and VLAN tables, the rest of the address array — none
@@ -187,13 +178,7 @@ impl Device for Filters {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{ADDRESS, FILTERS, PAGE};
-
-    #[test]
-    fn the_address_pair_is_inside_the_filters_page() {
-        assert!(ADDRESS + 8 <= PAGE);
-        assert!(FILTERS + PAGE > FILTERS + ADDRESS);
-    }
-}
+const _: () = assert!(
+    ADDRESS + 8 <= PAGE,
+    "the address pair must sit inside the filters page, the one page trapped"
+);

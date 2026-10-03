@@ -218,6 +218,44 @@ impl Framebuffer {
     }
 }
 
+/// Which byte of a pixel holds which channel.
+///
+/// Both carried orders are four bytes wide with the fourth byte ignored by
+/// the hardware; they differ only in how the three visible ones are spelled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channels {
+    /// Red, green, blue, then the ignored byte.
+    RedGreenBlue,
+    /// Blue, green, red, then the ignored byte.
+    BlueGreenRed,
+}
+
+impl Channels {
+    /// Reads the order out of a handoff description.
+    ///
+    /// [`Framebuffer::usable`] refuses every format but the two below, so a
+    /// `None` here means the description was never checked, not that a checked
+    /// one slipped past it.
+    #[must_use]
+    pub const fn of(format: u32) -> Option<Self> {
+        match format {
+            Framebuffer::RGBX => Some(Self::RedGreenBlue),
+            Framebuffer::BGRX => Some(Self::BlueGreenRed),
+            _ => None,
+        }
+    }
+
+    /// Lays a colour, given as red, green and blue, out in the display's
+    /// byte order.
+    #[must_use]
+    pub const fn encode(self, colour: [u8; 3]) -> [u8; 4] {
+        match self {
+            Self::RedGreenBlue => [colour[0], colour[1], colour[2], 0],
+            Self::BlueGreenRed => [colour[2], colour[1], colour[0], 0],
+        }
+    }
+}
+
 impl Handoff {
     /// Identifies a real handoff. `"PULZARH1"`, chosen to be recognizable in a
     /// hex dump and impossible to confuse with the firmware image handle that

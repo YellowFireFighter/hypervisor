@@ -42,6 +42,15 @@ impl Mac {
         Self(bytes)
     }
 
+    /// The address a controller's register pair holds: all four bytes of
+    /// the low register, then the first two of the high one, each register
+    /// little-endian.
+    pub(crate) const fn from_registers(low: u32, high: u32) -> Self {
+        let [first, second, third, fourth] = low.to_le_bytes();
+        let [fifth, sixth, ..] = high.to_le_bytes();
+        Self([first, second, third, fourth, fifth, sixth])
+    }
+
     /// The bytes of this address.
     pub(crate) const fn bytes(self) -> [u8; BYTES] {
         self.0

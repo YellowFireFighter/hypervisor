@@ -35,6 +35,16 @@ enum Cli {
         /// memory are unaffected and still readable from a debugger.
         #[arg(long)]
         silent: bool,
+        /// Build the loader to start Limine as the guest's boot manager
+        /// instead of Windows', for the Linux demonstration disks.
+        #[arg(long)]
+        limine: bool,
+        /// Draw the log on the screen instead of the boot screen.
+        ///
+        /// For a machine whose only output is its display; pointless with
+        /// --silent, which leaves no log to draw.
+        #[arg(long, conflicts_with = "silent")]
+        screen_log: bool,
     },
     /// Provision a guest OS disk image (a one-time setup step per machine).
     #[command(subcommand)]
@@ -77,6 +87,10 @@ enum Cli {
         /// is built, because nothing of pulzar's is used.
         #[arg(long)]
         no_hypervisor: bool,
+        /// Draw the log on the screen instead of the boot screen, as
+        /// `build --screen-log`.
+        #[arg(long, conflicts_with = "silent")]
+        screen_log: bool,
     },
 }
 
@@ -131,11 +145,32 @@ impl Guest {
             Self::None => "none",
         }
     }
+
+    /// The boot manager the loader starts for this guest: Limine for the
+    /// Linux disks, and the Windows boot manager otherwise.
+    fn chain(self) -> esp::Chain {
+        match self {
+            Self::Linux | Self::Cachyos => esp::Chain::Limine,
+            Self::Windows | Self::None => esp::Chain::Windows,
+        }
+    }
 }
 
 fn main() -> Result<()> {
     match Cli::parse() {
-        Cli::Build { release, silent } => esp::stage(release, silent).map(|_| ()),
+        Cli::Build {
+            release,
+            silent,
+            limine,
+            screen_log,
+        } => {
+            let chain = if limine {
+                esp::Chain::Limine
+            } else {
+                esp::Chain::Windows
+            };
+            esp::stage(release, silent, chain, screen(screen_log)).map(|_| ())
+        }
         Cli::Disk(DiskCommand::Linux { force }) => disk::linux(force),
         Cli::Disk(DiskCommand::Cachyos { force }) => disk::cachyos(force),
         Cli::Disk(DiskCommand::Windows { iso, force }) => disk::windows(&iso, force),
@@ -147,6 +182,7 @@ fn main() -> Result<()> {
             no_console,
             serial_log,
             no_hypervisor,
+            screen_log,
         } => {
             // Three ways of asking, and they collapse to one answer here so that
             // nothing downstream has to hold both a flag and a list and decide
@@ -161,7 +197,24 @@ fn main() -> Result<()> {
             } else {
                 vm::Layering::Hypervisor
             };
-            vm::run(os, release, gdb, silent, console, layering)
+            vm::run(
+                os,
+                release,
+                gdb,
+                silent,
+                console,
+                layering,
+                screen(screen_log),
+            )
         }
+    }
+}
+
+/// What the images draw on the display, from whether the log was asked for.
+const fn screen(log: bool) -> esp::Screen {
+    if log {
+        esp::Screen::Log
+    } else {
+        esp::Screen::Splash
     }
 }

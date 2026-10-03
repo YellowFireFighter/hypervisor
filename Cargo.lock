@@ -581,6 +581,7 @@ dependencies = [
  "serial",
  "snapshot",
  "spin 0.12.2",
+ "splash",
  "svm",
  "talc",
  "thiserror",
@@ -601,6 +602,7 @@ dependencies = [
  "paging",
  "serial",
  "snapshot",
+ "splash",
  "thiserror",
  "uefi",
  "x86_64",
@@ -1182,6 +1184,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8abadc99fd9c7bbb7d0ca2b31d72a067d0c0dcd7aad25ab8cac71ba91417694b"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "splash"
+version = "0.1.0"
+dependencies = [
+ "font8x8",
+ "handoff",
 ]
 
 [[package]]

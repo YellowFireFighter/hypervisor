@@ -15,8 +15,36 @@ use crate::{paths, proc};
 /// `target/`, and destination path inside the ESP.
 const IMAGES: [(&str, &str, &str); 2] = [
     ("hv-loader", "hv-loader.efi", "EFI/BOOT/BOOTX64.EFI"),
-    ("hv-core", "hv-core.efi", "EFI/Microsoft/Boot/bootmgfw.efi"),
+    ("hv-core", "hv-core.efi", "pulzar.efi"),
 ];
+
+/// The boot manager the loader starts as the first guest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chain {
+    /// The Windows boot manager, found on the guest's own system partition.
+    Windows,
+    /// Limine, which the Linux demonstration disks carry.
+    Limine,
+}
+
+/// What both images show on the screen while the host comes up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    /// The boot screen: the mark, its shine, the loading bar and the spinner.
+    Splash,
+    /// The log, drawn line by line as it is written.
+    Log,
+}
+
+impl Screen {
+    /// The feature both images build this with.
+    const fn feature(self) -> &'static str {
+        match self {
+            Self::Splash => "splash",
+            Self::Log => "efifb",
+        }
+    }
+}
 
 /// Compiles the UEFI crates and repopulates `dist/esp/` from scratch,
 /// returning its path.
@@ -27,7 +55,11 @@ const IMAGES: [(&str, &str, &str); 2] = [
 /// compiled once for the build and either would do it: a flag whose effect
 /// depends on feature unification is one that stops working the moment the
 /// dependency graph changes.
-pub fn stage(release: bool, silent: bool) -> Result<PathBuf> {
+///
+/// `chain` names the boot manager the loader is built to start, which is the
+/// loader's own `limine` feature for [`Chain::Limine`], and `screen` what both
+/// images draw on the display, asked of both for the same reason `silent` is.
+pub fn stage(release: bool, silent: bool, chain: Chain, screen: Screen) -> Result<PathBuf> {
     let root = paths::workspace_root();
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut build = Command::new(cargo);
@@ -38,13 +70,21 @@ pub fn stage(release: bool, silent: bool) -> Result<PathBuf> {
     if release {
         build.arg("--release");
     }
+    let mut features: Vec<String> = IMAGES
+        .iter()
+        .map(|(package, _, _)| format!("{package}/{}", screen.feature()))
+        .collect();
     if silent {
-        let features: Vec<String> = IMAGES
-            .iter()
-            .map(|(package, _, _)| format!("{package}/quiet"))
-            .collect();
-        build.args(["--features", &features.join(",")]);
+        features.extend(
+            IMAGES
+                .iter()
+                .map(|(package, _, _)| format!("{package}/quiet")),
+        );
     }
+    if chain == Chain::Limine {
+        features.push("hv-loader/limine".to_owned());
+    }
+    build.args(["--features", &features.join(",")]);
     proc::run(&mut build, "it ships with the Rust toolchain")?;
 
     let profile = if release { "release" } else { "debug" };

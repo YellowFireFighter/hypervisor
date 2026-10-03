@@ -23,6 +23,8 @@ handoff = { workspace = true }
 log = { workspace = true }
 paging = { workspace = true }
 serial = { workspace = true }
+# The boot screen's first frame, drawn as soon as the loader starts.
+splash = { workspace = true }
 snapshot = { workspace = true }
 thiserror = { workspace = true }
 uefi = { workspace = true }
@@ -45,6 +47,15 @@ quiet = ["serial/quiet"]
 # by default because a screen is a guest-facing device once the firmware guest
 # starts drawing.
 efifb = ["serial/efifb"]
+
+# The boot screen, in place of firmware's text from the moment the loader
+# starts. Draws on the same pixels as `efifb`, so the two cannot be built
+# together.
+splash = []
+
+# Starts Limine as the first guest's boot manager instead of Windows', for the
+# Linux disks the demonstrations run.
+limine = []
 
 [lints]
 workspace = true

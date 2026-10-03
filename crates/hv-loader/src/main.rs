@@ -37,7 +37,10 @@ mod error;
 mod firmware;
 mod image;
 
-use core::{arch::asm, convert::Infallible, ptr::NonNull};
+#[cfg(all(feature = "splash", feature = "efifb"))]
+compile_error!("`splash` and `efifb` both draw on the screen; build with one of them");
+
+use core::{arch::asm, convert::Infallible, ptr::NonNull, time::Duration};
 
 use clock::Wall;
 use handoff::Handoff;
@@ -148,6 +151,7 @@ fn main() -> Status {
     // their physical address and need no mapping of ours.
     let screen = firmware::framebuffer();
     serial::offer_screen(&screen, screen.base);
+    show_splash(&screen);
     info!("loader: pulzar hv-loader starting");
     if screen.usable() {
         info!(
@@ -165,6 +169,27 @@ fn main() -> Status {
             error!("loader: boot failed: {error}");
             error.status()
         }
+    }
+}
+
+/// Clears the screen and draws the boot screen's first frame on it, with the
+/// `splash` feature, so that from here until the guest starts the display
+/// shows the splash rather than firmware's text.
+///
+/// Only the first frame: the loader has no clock to animate with and runs for
+/// a moment. The hypervisor image draws on over the same pixels and is what
+/// animates them.
+fn show_splash(screen: &handoff::Framebuffer) {
+    if !cfg!(feature = "splash") {
+        return;
+    }
+    // SAFETY: firmware's identity map stands, so the frame buffer's physical
+    // base addresses all `pitch * height` bytes of it, writable, as firmware's
+    // own console drew through them; with the log not built in, nothing else
+    // draws on it while the frame is drawn.
+    if let Some(mut splash) = unsafe { splash::Splash::new(screen, screen.base) } {
+        splash.clear();
+        splash.draw(Duration::ZERO, splash::Progress::NONE);
     }
 }
 

@@ -32,7 +32,7 @@
 use core::fmt;
 
 use font8x8::legacy::BASIC_LEGACY;
-use handoff::Framebuffer;
+use handoff::{Channels, Framebuffer};
 
 /// Pixels each glyph cell is wide and tall on the display.
 ///
@@ -62,41 +62,6 @@ const FIRST_PRINTABLE: u8 = 0x20;
 const LAST_PRINTABLE: u8 = 0x7F;
 /// What a character outside the printable range is drawn as.
 const UNKNOWN_GLYPH: u8 = b'?';
-
-/// Which byte of a pixel holds which channel.
-///
-/// Both carried orders are four bytes wide with the fourth byte ignored by
-/// the hardware; they differ only in how the three visible ones are spelled.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Channels {
-    /// Red, green, blue, then the ignored byte.
-    RedGreenBlue,
-    /// Blue, green, red, then the ignored byte.
-    BlueGreenRed,
-}
-
-impl Channels {
-    /// Reads the order out of a handoff description.
-    ///
-    /// [`Framebuffer::usable`] refuses every format but the two below, so a
-    /// `None` here means the description was never checked, not that a checked
-    /// one slipped past it.
-    pub(crate) const fn of(format: u32) -> Option<Self> {
-        match format {
-            Framebuffer::RGBX => Some(Self::RedGreenBlue),
-            Framebuffer::BGRX => Some(Self::BlueGreenRed),
-            _ => None,
-        }
-    }
-
-    /// Lays a colour out in the display's byte order.
-    const fn encode(self, colour: [u8; 3]) -> [u8; 4] {
-        match self {
-            Self::RedGreenBlue => [colour[0], colour[1], colour[2], 0],
-            Self::BlueGreenRed => [colour[2], colour[1], colour[0], 0],
-        }
-    }
-}
 
 /// Where the next glyph goes, in cells.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -292,9 +257,10 @@ impl fmt::Write for Efifb {
 mod tests {
     //! Drawing decisions, over buffers that stand in for the mapping.
 
+    use handoff::Channels;
+
     use super::{
-        BACKGROUND, CELL_HEIGHT, CELL_WIDTH, Canvas, Channels, Cursor, FOREGROUND, GLYPH_HEIGHT,
-        SCALE,
+        BACKGROUND, CELL_HEIGHT, CELL_WIDTH, Canvas, Cursor, FOREGROUND, GLYPH_HEIGHT, SCALE,
     };
     extern crate std;
     use std::{vec, vec::Vec};

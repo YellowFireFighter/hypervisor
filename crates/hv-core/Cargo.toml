@@ -37,6 +37,8 @@ probe = { workspace = true }
 processor = { workspace = true }
 serial = { workspace = true }
 snapshot = { workspace = true }
+# The boot screen, animated here while the host comes up.
+splash = { workspace = true }
 spin = { workspace = true }
 svm = { workspace = true }
 talc = { workspace = true }
@@ -66,6 +68,11 @@ quiet = ["serial/quiet"]
 # by default because a screen is a guest-facing device once the firmware guest
 # starts drawing.
 efifb = ["serial/efifb"]
+
+# The boot screen: the mark, its shine, the loading bar and the spinner, drawn
+# onto the frame buffer while the host comes up and held until the bar fills.
+# Draws on the same pixels as `efifb`, so the two cannot be built together.
+splash = []
 
 [lints]
 workspace = true
