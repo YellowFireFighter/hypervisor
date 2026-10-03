@@ -1,0 +1,24 @@
+[package]
+name = "ipi"
+description = "Interprocessor interrupts, their handlers, and translation shootdown"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+apic = { workspace = true }
+clock = { workspace = true }
+cpu = { workspace = true }
+descriptors = { workspace = true }
+log = { workspace = true }
+# The nested page tables, which are underneath this crate and must not gain a way
+# to reach another processor of their own: what they get is one function pointer,
+# for making a processor leave the guest it is inside.
+npt = { workspace = true }
+paging = { workspace = true }
+spin = { workspace = true }
+thiserror = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

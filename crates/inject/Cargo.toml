@@ -1,0 +1,23 @@
+[package]
+name = "inject"
+description = "What a guest is owed, and how it comes to take it"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+descriptors = { workspace = true }
+log = { workspace = true }
+processor = { workspace = true }
+svm = { workspace = true }
+vcpu = { workspace = true }
+# For `Priority` alone. The interrupt window this crate arms carries a priority
+# class, and the processor compares it against the class the guest's own task
+# priority holds — which is the other half of the controller's deliverability
+# rule. A second declaration of where that class sits in a byte would be a second
+# definition of that rule, and if the two ever disagreed the guest would exit
+# forever retiring nothing.
+vlapic = { workspace = true }
+
+[lints]
+workspace = true

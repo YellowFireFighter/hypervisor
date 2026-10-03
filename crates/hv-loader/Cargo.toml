@@ -1,0 +1,50 @@
+# `per-package-target` lets this manifest pin its own build target, so the
+# workspace needs no global default and host-side crates coexist with UEFI
+# ones under a plain `cargo build`.
+cargo-features = ["per-package-target"]
+
+[package]
+name = "hv-loader"
+description = "First-stage UEFI loader for the pulzar hypervisor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+forced-target = "x86_64-unknown-uefi"
+
+[[bin]]
+name = "hv-loader"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+clock = { workspace = true }
+handoff = { workspace = true }
+log = { workspace = true }
+paging = { workspace = true }
+serial = { workspace = true }
+snapshot = { workspace = true }
+thiserror = { workspace = true }
+uefi = { workspace = true }
+x86_64 = { workspace = true }
+
+[features]
+# Strips every log record out of this image, and out of every crate it is built
+# with: `log` is compiled once for the build, so this reaches all of them.
+#
+# For a real machine. A byte down a 16550 costs 260 µs with interrupts held off
+# and a machine-wide lock taken, a board with a serial header has a working one
+# behind it whether or not a cable is plugged in, and a per-exit diagnostic then
+# costs more wall clock than the guest it is describing. Everything that records
+# state in memory — the exit census's counters, each controller's own — is
+# unaffected and still readable from a debugger.
+quiet = ["serial/quiet"]
+
+# The logging screen backend, for machines with neither a debug console nor a
+# UART header. Compiles the backend and its glyph tables into this image; off
+# by default because a screen is a guest-facing device once the firmware guest
+# starts drawing.
+efifb = ["serial/efifb"]
+
+[lints]
+workspace = true
