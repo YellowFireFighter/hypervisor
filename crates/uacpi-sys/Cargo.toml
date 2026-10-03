@@ -8,6 +8,12 @@ publish.workspace = true
 # static library can never end up in one link.
 links = "uacpi"
 
+# The generated bindings carry uACPI's C comments over as Rust doc comments,
+# and rustdoc would compile their C fragments as Rust doctests. Nothing in this
+# crate is a doc example, so there is nothing for doctests to run.
+[lib]
+doctest = false
+
 [build-dependencies]
 bindgen = { workspace = true }
 cc = { workspace = true }
