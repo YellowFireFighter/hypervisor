@@ -164,8 +164,8 @@ Host-side tooling:
 ### Clone and build
 
 ```bash
-git clone --recurse-submodules https://github.com/qwnd-real/pulzar-hypervisor
-cd pulzar-hypervisor
+git clone --recurse-submodules https://github.com/YellowFireFighter/hypervisor
+cd hypervisor
 cargo xtask build
 ```
 
