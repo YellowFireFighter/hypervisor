@@ -601,6 +601,7 @@ dependencies = [
  "paging",
  "serial",
  "snapshot",
+ "splash",
  "thiserror",
  "uefi",
  "x86_64",
