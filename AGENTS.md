@@ -48,22 +48,28 @@ pulzar/
 ├── rust-toolchain.toml  ← pinned nightly; do not float the channel
 ├── rustfmt.toml         ← formatting policy (uses unstable options → nightly)
 ├── .cargo/config.toml   ← cargo aliases (`cargo xtask`)
-└── crates/
-    ├── drivers/          ← device drivers that interpose a guest's device MMIO
-    │   └── nvme/         ← answers a guest's NVMe identify commands with spoofed identity
-    ├── hv-loader/       ← UEFI application: first-stage loader for the hypervisor
-    ├── hv-core/         ← UEFI application: hypervisor image (stub until the loader loads it)
-    └── xtask/           ← host tool: stages boot media, provisions guest disks, runs QEMU
+├── crates/
+│   ├── hv-loader/       ← UEFI application: first-stage loader for the hypervisor
+│   ├── hv-core/         ← UEFI application: the hypervisor image the loader maps and jumps to
+│   ├── drivers/         ← device drivers that interpose a guest's device MMIO
+│   │   ├── nvme/        ← answers a guest's NVMe identify commands with spoofed identity
+│   │   └── ethernet/    ← answers a guest's MAC address reads with spoofed identity
+│   ├── xtask/           ← host tool: stages boot media, provisions guest disks, runs QEMU
+│   └── …/               ← target-agnostic `no_std` libraries (README lists each one)
+├── tools/
+│   └── apic-dump/       ← guest-side tool: prints interrupt controllers over the hypercall
+└── third_party/
+    └── uacpi/           ← uACPI, a pinned git submodule compiled by `uacpi-sys`
 ```
 
 - `hv-loader` is a `no_std`/`no_main` UEFI PE application built for
   `x86_64-unknown-uefi`, using the rust-osdev `uefi` crate. It runs under
-  firmware boot services; its job (eventually) is to locate, map, and jump into
-  the hypervisor image.
-- `hv-core` is today a UEFI PE stub standing in for the hypervisor image, so
-  boot media and staging are exercised end to end. The real hypervisor core
-  will move to a custom freestanding target with `-Z build-std` — this is why
-  the toolchain is nightly.
+  firmware boot services; its job is to locate, map, and jump into the
+  hypervisor image.
+- `hv-core` is the hypervisor image. It is built as a UEFI PE so boot media
+  and staging share one target, but firmware never starts it: the loader maps
+  it and jumps to its entry point. It will move to a custom freestanding
+  target with `-Z build-std` — this is why the toolchain is nightly.
 - There is no workspace-wide default target: the two UEFI applications pin
   `x86_64-unknown-uefi` via `forced-target` (nightly `per-package-target`
   feature) and pull every library crate in as a UEFI dependency, while the
