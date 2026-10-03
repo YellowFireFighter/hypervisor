@@ -73,6 +73,7 @@ there is nothing for a guest to find.
 | NVMe spoofing | Identify responses answered with spoofed identity, data path untouched (see below) |
 | Hypercall | Versioned `VMMCALL` interface, answerable from ring 3 — a tool inside the guest needs no driver |
 | Logging | 16550 UART, QEMU debug console and frame-buffer backends; every record can be compiled out |
+| Boot screen | The `yxllow.dev` mark with a shine sweeping across it, a loading bar and a spinner, held at least three seconds (see below) |
 
 ### The interrupt controller
 
@@ -136,6 +137,7 @@ Firmware-side libraries, target-agnostic `no_std` so their tests run natively:
 | `processor` | What the processor underneath all of them can do |
 | `serial` | 16550 UART, debug console and frame-buffer logging backends |
 | `snapshot` | The firmware context, read before any of it is overwritten |
+| `splash` | The boot screen, drawn onto the frame buffer while the host comes up |
 | `spoof` | The keyed, format-preserving transform behind identity replacement |
 | `svm` | AMD's SVM structures stated once, with layouts checked at compile time |
 | `uacpi-sys` | The uACPI submodule, compiled and bound |
@@ -213,6 +215,25 @@ cargo xtask run --os linux
 | `--no-console` | Give the guest no debug console and no serial port at all |
 | `--serial-log FILE` | Capture guest log output to a file (repeatable: debug console first, then COM ports) |
 | `--no-hypervisor` | Boot the guest disk directly, pulzar taken out — the same machine and disk, to tell a fault of the hypervisor's from one the guest has anyway |
+| `--screen-log` | Draw the log on the screen instead of the boot screen |
+
+`cargo xtask build` takes `--release`, `--silent` and `--screen-log` the same
+way, and `--limine` for the Linux demonstration disks.
+
+### The boot screen
+
+From the moment the loader starts until the guest's own boot manager takes the
+display, the screen shows `yxllow.dev` in yellow with a white shine sweeping
+across it, and beneath it a loading bar with a spinner turning at its end. The
+loader clears firmware's text and draws the first frame; the hypervisor image
+animates it, advances the bar at each step of bring-up, and holds it until the
+bar has filled over at least three seconds — so a machine that comes up in a
+fraction of one still shows the whole of it — then blanks the screen and
+enters the guest.
+
+It is the images' `splash` feature, which `xtask` builds by default. The
+on-screen log (`efifb`, `--screen-log`) draws on the same pixels, so a build
+has one or the other; with neither, the screen is left as firmware had it.
 
 Every run gets an NVMe controller with a blank scratch disk, so the one
 interposed device is exercised on every boot. The default machine is q35

@@ -137,6 +137,7 @@ pub fn run(
     silent: bool,
     console: Console,
     layering: Layering,
+    screen: esp::Screen,
 ) -> Result<()> {
     ensure!(
         matches!(layering, Layering::Hypervisor) || os != Guest::None,
@@ -152,7 +153,7 @@ pub fn run(
         )?),
     };
     let esp = match layering {
-        Layering::Hypervisor => Some(esp::stage(release, silent, os.chain())?),
+        Layering::Hypervisor => Some(esp::stage(release, silent, os.chain(), screen)?),
         Layering::Bare => {
             println!("booting {} with no hypervisor in front of it", os.label());
             None
