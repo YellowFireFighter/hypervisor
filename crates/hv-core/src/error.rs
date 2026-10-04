@@ -25,6 +25,13 @@ use vlapic::VlapicError;
 /// A failure during bring-up.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CoreError {
+    /// The VMX self-test ran to completion and the build halts deliberately,
+    /// because the rest of pulzar is AMD SVM and cannot run the guest on the
+    /// Intel machine the self-test is for. Not an error in the ordinary sense;
+    /// it takes the halt-and-report path every other variant does.
+    #[cfg(feature = "vmx-selftest")]
+    #[error("vmx self-test complete; halting (pulzar's guest path is AMD SVM)")]
+    VmxSelfTestComplete,
     /// The boot protocol the loader passed cannot be used.
     #[error(transparent)]
     Handoff(#[from] HandoffError),

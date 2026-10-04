@@ -589,6 +589,8 @@ dependencies = [
  "uefi-raw",
  "vcpu",
  "vlapic",
+ "vmcs",
+ "vmx",
  "x86_64",
 ]
 

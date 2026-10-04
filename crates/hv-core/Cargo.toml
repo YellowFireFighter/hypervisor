@@ -48,6 +48,10 @@ thiserror = { workspace = true }
 uacpi-sys = { workspace = true }
 uefi-raw = { workspace = true }
 vcpu = { workspace = true }
+# The Intel VMX definitions and the executable VMX layer, pulled in only by
+# the vmx-selftest feature below.
+vmx = { workspace = true, optional = true }
+vmcs = { workspace = true, optional = true }
 vlapic = { workspace = true }
 x86_64 = { workspace = true }
 
@@ -73,6 +77,13 @@ efifb = ["serial/efifb"]
 # onto the frame buffer while the host comes up and held until the bar fills.
 # Draws on the same pixels as `efifb`, so the two cannot be built together.
 splash = []
+
+# A one-shot check, on an Intel processor, that this build can enter VMX
+# operation and that the VMCS instruction wrappers round-trip. Runs early in
+# bring-up and then halts, because the rest of pulzar is AMD SVM and cannot
+# proceed on an Intel machine. For bringing the unverified Intel path up on
+# real hardware; off in every ordinary build.
+vmx-selftest = ["dep:vmx", "dep:vmcs"]
 
 [lints]
 workspace = true

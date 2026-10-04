@@ -45,6 +45,8 @@ mod avic;
 mod error;
 mod heap;
 mod screen;
+#[cfg(feature = "vmx-selftest")]
+mod selftest;
 mod uacpi;
 
 use core::{convert::Infallible, ffi::c_void, hint::black_box, panic::PanicInfo};
@@ -211,6 +213,16 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     let acpi = survey_machine(handoff, &space)?;
     start_clock(&mut space, &acpi, handoff)?;
     screen.advance(Step::Clock);
+
+    // The Intel VMX self-test, when this build is for it: run the first piece
+    // of the unverified VMX path on real hardware and halt, since the guest
+    // path below is AMD SVM and cannot run on an Intel machine. The `if` guards
+    // the return on a value the compiler cannot fold away, so the SVM path
+    // below is not flagged unreachable under the feature.
+    #[cfg(feature = "vmx-selftest")]
+    if selftest::run(&space) {
+        return Err(CoreError::VmxSelfTestComplete);
+    }
 
     // The roster first, because everything below it is sized by how many
     // processors firmware described; then the interrupt controllers, which is
