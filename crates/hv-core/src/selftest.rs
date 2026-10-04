@@ -19,7 +19,7 @@ use ept::{ENTRIES, Memory};
 use log::{error, info, warn};
 use paging::AddressSpace;
 use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
-use vmexits::Flow;
+use vmexits::{Flow, Stop};
 use vmx::{
     BasicExitReason, EptAccess, EptEntry, EptMemoryType, EptPointer, ExitReason, Field,
     Interruption, PAGE_BYTES, VmxBasic, event::Kind,
@@ -174,6 +174,10 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
             "guest runs in its own address space behind a non-identity EPT",
             own_address_space_probe(cell, space),
         );
+        check(
+            "EPT violation demand-maps a missing page",
+            ept_demand_probe(cell, space),
+        );
     } else {
         warn!("vmx: EPT not available on this processor; skipping the EPT guest checks");
     }
@@ -208,6 +212,10 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
     check(
         "event with error code injected through the guest IDT",
         inject_probe(cell, 13, true),
+    );
+    check(
+        "control-register access decoded from its qualification",
+        cr_access_probe(cell),
     );
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
@@ -848,15 +856,48 @@ unsafe extern "C" fn guest_own_space() {
     );
 }
 
-/// Runs a guest in its own address space behind a non-identity EPT and checks
-/// it read the planted value and the value it wrote back.
+/// A guest's own address space for a self-test: its paging structures, its data
+/// and stack pages, and the EPT that redirects every one of their
+/// guest-physical addresses to a host frame of the host's choosing.
+#[expect(
+    dead_code,
+    reason = "the page fields are held only to keep the guest's frames allocated while the processor walks them; they are freed when GuestSpace drops"
+)]
+struct GuestSpace<'a> {
+    /// The guest's data page, with the planted value at its start.
+    data: Box<Page>,
+    /// The guest's stack page.
+    stack: Box<Page>,
+    /// The guest's top-level paging structure.
+    pml4: Box<Page>,
+    /// The guest's page-directory-pointer table.
+    pdpt: Box<Page>,
+    /// The guest's page directory.
+    pd: Box<Page>,
+    /// The EPT tree's own frames and the means to reach them.
+    memory: EptMemory<'a>,
+    /// Physical address of the EPT root.
+    root: u64,
+    /// The EPT pointer to install in the VMCS.
+    eptp: EptPointer,
+    /// Host-physical address of the data page, for a later demand mapping.
+    data_pa: u64,
+    /// Guest `RIP`: the guest-virtual address the code runs at.
+    rip: u64,
+}
+
+/// Builds a guest address space whose code is the function at `guest_fn`. Every
+/// page is mapped in EPT except, when `map_data` is false, the data page, which
+/// is left to fault.
 ///
-/// The guest's three live pages (code, data, stack) and its three paging
-/// structures are each given a guest-physical address of the host's choosing
-/// and mapped through EPT to a host frame that is not that address, so reaching
-/// the `VMCALL` with both values proves the guest paging and the EPT
-/// translation both work and compose.
-fn own_address_space_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+/// The code runs in place: the real host page of `guest_fn` is mapped into the
+/// guest at [`GUEST_CODE`], so nothing is copied. A second page follows it in
+/// case the function straddles a boundary.
+fn build_guest_space(
+    space: &AddressSpace,
+    guest_fn: *const (),
+    map_data: bool,
+) -> Option<GuestSpace<'_>> {
     let mut data = Page::zeroed();
     let stack = Page::zeroed();
     let mut pml4 = Page::zeroed();
@@ -866,9 +907,8 @@ fn own_address_space_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
     data.0[..8].copy_from_slice(&GUEST_PLANTED.to_le_bytes());
     pml4.0[..8].copy_from_slice(&(GUEST_PDPT | PTE_PRESENT_WRITABLE).to_le_bytes());
     pdpt.0[..8].copy_from_slice(&(GUEST_PD | PTE_PRESENT_WRITABLE).to_le_bytes());
-    // The one page-directory entry is a 2-MiB leaf mapping guest-virtual
-    // 0..2 MiB onto guest-physical 0..2 MiB, which covers every address the
-    // guest names.
+    // One 2-MiB leaf maps guest-virtual 0..2 MiB onto guest-physical 0..2 MiB,
+    // covering every address the guest names.
     pd.0[..8].copy_from_slice(&(PTE_LARGE | PTE_PRESENT_WRITABLE).to_le_bytes());
 
     let at = |page: &Page| VirtAddr::new(core::ptr::from_ref(&page.0).addr() as u64);
@@ -879,63 +919,82 @@ fn own_address_space_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         space.translate(at(&pdpt)),
         space.translate(at(&pd)),
     ) else {
-        error!("vmx: own-address could not translate its frames");
-        return false;
+        error!("vmx: guest space could not translate its frames");
+        return None;
     };
 
-    // The guest's code runs in place: its real host page is mapped into the
-    // guest at GUEST_CODE, so no bytes are copied. A second page follows in case
-    // the function straddles a page boundary.
-    let fn_va = (guest_own_space as *const ()).addr() as u64;
+    let fn_va = guest_fn.addr() as u64;
     let code_page = fn_va & !0xFFF;
     let (Ok(code_pa0), Ok(code_pa1)) = (
         space.translate(VirtAddr::new(code_page)),
         space.translate(VirtAddr::new(code_page + PAGE_BYTES as u64)),
     ) else {
-        error!("vmx: own-address could not translate its code page");
-        return false;
+        error!("vmx: guest space could not translate its code page");
+        return None;
     };
 
     let mut memory = EptMemory {
         frames: Vec::new(),
         space,
     };
-    let Some(root) = memory.allocate() else {
-        error!("vmx: own-address could not allocate the EPT root");
-        return false;
-    };
-    let mappings = [
-        (GUEST_DATA, data_pa.as_u64()),
-        (GUEST_STACK_TOP - PAGE_BYTES as u64, stack_pa.as_u64()),
-        (GUEST_CODE, code_pa0.as_u64()),
-        (GUEST_CODE + PAGE_BYTES as u64, code_pa1.as_u64()),
-        (GUEST_PML4, pml4_pa.as_u64()),
-        (GUEST_PDPT, pdpt_pa.as_u64()),
-        (GUEST_PD, pd_pa.as_u64()),
+    let root = memory.allocate()?;
+    let mut mappings = [
+        Some((GUEST_STACK_TOP - PAGE_BYTES as u64, stack_pa.as_u64())),
+        Some((GUEST_CODE, code_pa0.as_u64())),
+        Some((GUEST_CODE + PAGE_BYTES as u64, code_pa1.as_u64())),
+        Some((GUEST_PML4, pml4_pa.as_u64())),
+        Some((GUEST_PDPT, pdpt_pa.as_u64())),
+        Some((GUEST_PD, pd_pa.as_u64())),
+        map_data.then_some((GUEST_DATA, data_pa.as_u64())),
     ];
-    for (gpa, hpa) in mappings {
+    for (gpa, hpa) in mappings.iter_mut().flatten() {
         if ept::map(
             &mut memory,
             root,
-            gpa,
-            hpa,
+            *gpa,
+            *hpa,
             GUEST_EPT_ACCESS,
             EptMemoryType::WriteBack,
         )
         .is_err()
         {
-            error!("vmx: own-address EPT mapping of {gpa:#x} failed");
-            return false;
+            error!("vmx: guest space EPT mapping of {gpa:#x} failed");
+            return None;
         }
     }
-    let eptp = ept::pointer(root);
 
-    let rip = GUEST_CODE | (fn_va & 0xFFF);
+    Some(GuestSpace {
+        data,
+        stack,
+        pml4,
+        pdpt,
+        pd,
+        memory,
+        root,
+        eptp: ept::pointer(root),
+        data_pa: data_pa.as_u64(),
+        rip: GUEST_CODE | (fn_va & 0xFFF),
+    })
+}
+
+/// Runs a guest in its own address space behind a non-identity EPT and checks
+/// it read the planted value and the value it wrote back.
+///
+/// The guest's live pages (code, data, stack) and its paging structures are
+/// each given a guest-physical address of the host's choosing and mapped
+/// through EPT to a host frame that is not that address, so reaching the
+/// `VMCALL` with both values proves the guest paging and the EPT translation
+/// compose.
+fn own_address_space_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let Some(gs) = build_guest_space(space, guest_own_space as *const (), true) else {
+        return false;
+    };
+
     // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest's
-    // code, stack and data are reachable through the EPT and its own page tables
-    // built above, and the CR3 override points at the guest's PML4.
+    // code, stack and data are reachable through the EPT and its own page tables,
+    // and the CR3 override points at the guest's PML4.
     let programmed = unsafe {
-        program_guest(cell, Some(eptp), rip, GUEST_STACK_TOP)
+        program_guest(cell, Some(gs.eptp), gs.rip, GUEST_STACK_TOP)
             .and_then(|()| cell.write(Field::GUEST_CR3, GUEST_PML4))
     };
     if let Err(error) = programmed {
@@ -952,9 +1011,9 @@ fn own_address_space_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
             registers.r8, registers.r9
         );
     }
-    // The EPT tables, guest paging frames and data/stack pages are all walked by
-    // the processor for the whole of the run above, so they are dropped only now.
-    drop((data, stack, pml4, pdpt, pd, memory));
+    // The frames are walked by the processor for the whole of the run above, so
+    // they are dropped only now.
+    drop(gs);
     ok
 }
 
@@ -1052,6 +1111,197 @@ fn inject_probe(cell: &mut Vmcs, vector: u8, error_code: bool) -> bool {
         );
     }
     drop((idt, stack));
+    ok
+}
+
+/// A guest that reads its data page once and `VMCALL`s with what it read.
+///
+/// The read is the demand-paging probe's whole point: on the first entry the
+/// page is not mapped in EPT, so the read faults; the handler maps it and
+/// re-enters, and the restarted read then succeeds.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_read_data() {
+    core::arch::naked_asm!(
+        "mov rdi, {data}",
+        "mov r8, [rdi]",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        data = const GUEST_DATA,
+    );
+}
+
+/// Runs a guest whose data page is left out of its EPT, maps the page on the
+/// resulting violation, and checks the restarted access reads the planted
+/// value.
+///
+/// This is the EPT-violation path end to end: the processor reports the missing
+/// guest-physical address, the host adds the mapping to the live tree, flushes
+/// the cached translation with `INVEPT`, and re-enters without advancing the
+/// guest, so the faulting instruction runs again and sees the page.
+fn ept_demand_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let Some(mut gs) = build_guest_space(space, guest_read_data as *const (), false) else {
+        return false;
+    };
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; every page
+    // but the data page is reachable through the EPT and the guest's own tables,
+    // and the CR3 override points at the guest's PML4.
+    let programmed = unsafe {
+        program_guest(cell, Some(gs.eptp), gs.rip, GUEST_STACK_TOP)
+            .and_then(|()| cell.write(Field::GUEST_CR3, GUEST_PML4))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: EPT-demand programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let mut mapped = false;
+    let mut ok = false;
+    for _ in 0..MAX_ENTRIES {
+        // SAFETY: `cell` is current and fully programmed.
+        match unsafe { run::run(cell, &mut registers) } {
+            Entered::Failed(fail) => {
+                error!("vmx: EPT-demand entry rejected ({fail})");
+                break;
+            }
+            Entered::Exited => match exit_reason(cell) {
+                Some(BasicExitReason::EPT_VIOLATION) => {
+                    if !demand_map(&mut gs, cell) {
+                        break;
+                    }
+                    mapped = true;
+                }
+                Some(BasicExitReason::VMCALL) => {
+                    ok = mapped && registers.r8 == GUEST_PLANTED;
+                    if !ok {
+                        error!("vmx: EPT-demand: mapped {mapped}, read {:#x}", registers.r8);
+                    }
+                    break;
+                }
+                other => {
+                    error!("vmx: EPT-demand unexpected exit {other:?}");
+                    break;
+                }
+            },
+        }
+    }
+    drop(gs);
+    ok
+}
+
+/// Handles one EPT violation for the demand probe: reads the faulting address,
+/// maps the data page there, and flushes the stale translation so the restarted
+/// access sees it. Returns whether it succeeded.
+fn demand_map(gs: &mut GuestSpace, cell: &Vmcs) -> bool {
+    // SAFETY: `cell` is current, so the faulting guest-physical address is
+    // readable.
+    let Ok(gpa) = (unsafe { cell.read(Field::GUEST_PHYSICAL_ADDRESS) }) else {
+        error!("vmx: EPT-demand could not read the faulting address");
+        return false;
+    };
+    if gpa & !0xFFF != GUEST_DATA {
+        error!("vmx: EPT-demand faulted at {gpa:#x}, not the data page");
+        return false;
+    }
+    if ept::map(
+        &mut gs.memory,
+        gs.root,
+        GUEST_DATA,
+        gs.data_pa,
+        GUEST_EPT_ACCESS,
+        EptMemoryType::WriteBack,
+    )
+    .is_err()
+    {
+        error!("vmx: EPT-demand could not map the data page");
+        return false;
+    }
+    // SAFETY: VMX operation is live and the EPT just changed, whose cached
+    // translations must be dropped.
+    if unsafe { instr::invept_single(gs.eptp.bits()) }
+        .ok()
+        .is_err()
+    {
+        error!("vmx: EPT-demand INVEPT refused");
+        return false;
+    }
+    true
+}
+
+/// `CR4.TSD` (bit 2), a benign control-register bit the probe masks so a guest
+/// write to it exits.
+const CR4_TSD: u64 = 1 << 2;
+
+/// A guest that sets `CR4.TSD` and `VMCALL`s.
+///
+/// With that bit owned by the host in the guest/host mask and clear in the read
+/// shadow, the `MOV` to `CR4` that sets it exits before the `VMCALL` is
+/// reached.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_cr_write() {
+    core::arch::naked_asm!(
+        "mov rax, cr4",
+        "or rax, {bit}",
+        "mov cr4, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        bit = const CR4_TSD,
+    );
+}
+
+/// Runs a guest that writes a host-owned `CR4` bit and checks the dispatch loop
+/// reports a control-register access decoded from the exit qualification.
+///
+/// The guest/host mask makes the write exit, and the read shadow makes the bit
+/// read back clear so the write genuinely changes a masked bit; the exit's
+/// qualification then names `CR4`, a move to the register, and the source
+/// register the guest used.
+fn cr_access_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_cr_write as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+    let host_cr4 = x86_64::registers::control::Cr4::read_raw();
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // runs in the host address space, and the mask and shadow make a write to
+    // CR4.TSD the one access that exits.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| cell.write(Field::CR4_GUEST_HOST_MASK, CR4_TSD))
+            .and_then(|()| cell.write(Field::CR4_READ_SHADOW, host_cr4 & !CR4_TSD))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: CR-access programming failed: {error}");
+        drop(stack);
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    // SAFETY: `cell` is current and fully programmed.
+    let entered = unsafe { run::run(cell, &mut registers) };
+    if entered != Entered::Exited {
+        error!("vmx: CR-access did not exit cleanly: {entered:?}");
+        drop(stack);
+        return false;
+    }
+    // SAFETY: `cell` is current and `registers` is the block the run loop filled.
+    let flow = unsafe { vmexits::dispatch(cell, &mut registers) };
+    let ok = matches!(
+        flow,
+        Flow::Stop(Stop::ControlRegister(access))
+            if access.register == 4
+                && access.kind == vmexits::control_register::Kind::ToRegister
+                && access.gpr == 0
+    );
+    if !ok {
+        error!("vmx: CR-access: {flow:?}");
+    }
+    drop(stack);
     ok
 }
 
