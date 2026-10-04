@@ -17,9 +17,11 @@
 //! machine-specific core: whether firmware's real control registers, segments
 //! and descriptor tables pass the VM-entry consistency checks on this
 //! processor, and whether the world switch and the EPT carry firmware's own
-//! paging. When entry is refused it names the instruction error the processor
-//! gave, which is what the next step — a full portal and guest memory — is
-//! built from.
+//! paging. Before the entry it checks the programmed state against the VM-entry
+//! rules itself, logging each one broken, because a processor that refuses a
+//! guest's state does not say which rule it failed; after a refusal it logs the
+//! state the processor rejected. That is what the next step — a full portal and
+//! guest memory — is built from.
 //!
 //! Two parts of firmware's state are adjusted on the way in, because VMX
 //! demands what AMD's world switch does not check: a null task register becomes
@@ -33,10 +35,11 @@ use log::{error, info};
 use paging::AddressSpace;
 use snapshot::FirmwareContext;
 use svm::{SaveArea, Segment, SegmentAttributes};
-use vmcs::{Registers, VmFail, Vmcs, controls, fixed, host, instr};
+use vmcs::{Registers, VmFail, Vmcs, controls, fixed, host, inspect, instr};
 use vmexits::{Exit, Partition, Stop};
 use vmx::{
-    AccessRights, EptEntry, Field, FieldEncoding, PAGE_BYTES,
+    AccessRights, BasicExitReason, EptEntry, Field, FieldEncoding, PAGE_BYTES,
+    check::{self, GuestState, Subject},
     segment::{BUSY_TSS_TYPE, TYPE_ACCESSED},
 };
 use x86_64::VirtAddr;
@@ -200,6 +203,9 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
         firmware.cpu.cr3,
         entry.as_u64()
     );
+
+    // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
+    unsafe { predict(&cell) };
 
     let mut registers = Registers::default();
     // SAFETY: `cell` is the current, fully programmed VMCS, this processor is in
@@ -465,6 +471,18 @@ fn report(cell: &Vmcs, outcome: Exit) {
             let number = unsafe { cell.read(Field::VM_INSTRUCTION_ERROR) }.unwrap_or(0);
             error!("vmxboot: VM entry was rejected ({fail}); VM-instruction-error {number}");
         }
+        Exit::Stopped(Stop::EntryFailure(reason)) => {
+            // SAFETY: `cell` is current; after a failed entry the exit
+            // qualification says whether a specific cause was recorded.
+            let qualification = unsafe { cell.read(Field::EXIT_QUALIFICATION) }.unwrap_or(0);
+            error!(
+                "vmxboot: VM entry failed on the guest state ({reason}, qualification {qualification})"
+            );
+            if reason == BasicExitReason::ENTRY_FAILURE_GUEST_STATE {
+                // SAFETY: `cell` is current, in VMX operation.
+                unsafe { dump(cell) };
+            }
+        }
         Exit::Stopped(Stop::EptViolation(violation)) => {
             // SAFETY: `cell` is current; the faulting guest-physical address is
             // readable after an EPT violation.
@@ -472,6 +490,77 @@ fn report(cell: &Vmcs, outcome: Exit) {
             error!("vmxboot: the firmware guest took an EPT violation at {gpa:#x}: {violation:?}");
         }
         Exit::Stopped(stop) => error!("vmxboot: the firmware guest stopped: {stop:?}"),
+    }
+}
+
+/// Checks the programmed guest state against the VM-entry rules before the
+/// entry is tried, logging each one it breaks.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+unsafe fn predict(cell: &Vmcs) {
+    // SAFETY: the caller guarantees the current VMCS and VMX operation.
+    let (state, limits) = match unsafe { inspect::guest_state(cell) } {
+        // SAFETY: as above; VMX operation means the fixed-bit registers exist.
+        Ok(state) => (state, unsafe { inspect::limits() }),
+        Err(error) => {
+            error!("vmxboot: could not read the guest state back: {error}");
+            return;
+        }
+    };
+    let mut broken = 0_usize;
+    check::check(&state, &limits, |violation| {
+        broken += 1;
+        error!("vmxboot: guest state breaks a VM-entry rule: {violation}");
+    });
+    if broken == 0 {
+        info!("vmxboot: the guest state passes every VM-entry check citrine restates");
+    }
+}
+
+/// Logs the guest state a refused entry left in the VMCS, raw, so a check this
+/// does not restate can still be found from the numbers.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+unsafe fn dump(cell: &Vmcs) {
+    // SAFETY: the caller guarantees the current VMCS and VMX operation.
+    let state: GuestState = match unsafe { inspect::guest_state(cell) } {
+        Ok(state) => state,
+        Err(error) => {
+            error!("vmxboot: could not read the guest state back: {error}");
+            return;
+        }
+    };
+    error!(
+        "vmxboot: guest cr0 {:#x} cr3 {:#x} cr4 {:#x} efer {:#x} rflags {:#x} rip {:#x}",
+        state.cr0, state.cr3, state.cr4, state.efer, state.rflags, state.rip
+    );
+    error!(
+        "vmxboot: guest gdtr {:#x}+{:#x} idtr {:#x}+{:#x} dr7 {:#x} entry controls {:#x}",
+        state.gdtr.base,
+        state.gdtr.limit,
+        state.idtr.base,
+        state.idtr.limit,
+        state.dr7,
+        state.entry.bits()
+    );
+    for (name, segment) in [
+        (Subject::Cs, state.cs),
+        (Subject::Ss, state.ss),
+        (Subject::Ds, state.ds),
+        (Subject::Es, state.es),
+        (Subject::Fs, state.fs),
+        (Subject::Gs, state.gs),
+        (Subject::Ldtr, state.ldtr),
+        (Subject::Tr, state.tr),
+    ] {
+        error!(
+            "vmxboot: guest {name} selector {:#06x} base {:#x} limit {:#x} rights {:#x}",
+            segment.selector, segment.base, segment.limit, segment.rights
+        );
     }
 }
 
