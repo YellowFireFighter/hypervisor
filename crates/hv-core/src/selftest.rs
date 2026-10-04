@@ -134,31 +134,17 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
 
     // The enable path's own results, read back from hardware: it must have set
     // CR4.VMXE, and IA32_VMX_BASIC must describe a VMCS that fits a page.
+    check(
+        "this processor is detected as Intel",
+        processor::vendor() == processor::Vendor::Intel,
+    );
     check("CR4.VMXE set by the enable path", cr4_vmxe_set());
     check(
         "VMX basic region fits a page",
         (1..=PAGE_BYTES).contains(&(basic.region_bytes() as usize)),
     );
 
-    // Field round-trips across every width, which exercises the encoding of
-    // each: a wrong width or index would read back something other than what
-    // was written.
-    check(
-        "16-bit field round-trip",
-        roundtrip(cell, Field::GUEST_ES_SELECTOR, 0x1234),
-    );
-    check(
-        "32-bit field round-trip",
-        roundtrip(cell, Field::GUEST_ES_LIMIT, 0xDEAD_BEEF),
-    );
-    check(
-        "64-bit field round-trip",
-        roundtrip(cell, Field::TSC_OFFSET, 0x1122_3344_5566_7788),
-    );
-    check(
-        "natural-width field round-trip",
-        roundtrip(cell, Field::GUEST_RIP, 0x0000_0000_0040_1000),
-    );
+    field_roundtrip_checks(cell, &mut check);
     check(
         "guest launch, resume across CPUIDs, VMCALL",
         entry_probe(cell),
@@ -230,6 +216,28 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
     apicv_checks(cell, space, &mut check);
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
+}
+
+/// Round-trips a field of each width through the current VMCS, which exercises
+/// the encoding of each: a wrong width or index would read back something other
+/// than what was written.
+fn field_roundtrip_checks(cell: &Vmcs, check: &mut impl FnMut(&str, bool)) {
+    check(
+        "16-bit field round-trip",
+        roundtrip(cell, Field::GUEST_ES_SELECTOR, 0x1234),
+    );
+    check(
+        "32-bit field round-trip",
+        roundtrip(cell, Field::GUEST_ES_LIMIT, 0xDEAD_BEEF),
+    );
+    check(
+        "64-bit field round-trip",
+        roundtrip(cell, Field::TSC_OFFSET, 0x1122_3344_5566_7788),
+    );
+    check(
+        "natural-width field round-trip",
+        roundtrip(cell, Field::GUEST_RIP, 0x0000_0000_0040_1000),
+    );
 }
 
 /// Runs the APIC-virtualization checks, each gated on the processor offering
