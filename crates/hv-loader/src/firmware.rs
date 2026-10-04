@@ -90,9 +90,13 @@ pub struct GuestImage {
 
 /// Finds the guest image and asks firmware to load it.
 ///
-/// The path is searched on every Simple File System volume because firmware
-/// gives their handles no meaningful order. More than one match is refused: a
-/// boot decision made from handle order would not be reproducible.
+/// The path is searched on every Simple File System volume. When more than one
+/// carries it — a machine with several EFI system partitions — the volume the
+/// loader itself booted from is preferred, which is deterministic and is the
+/// partition the hypervisor was installed beside. Failing a match there, a
+/// single match anywhere is taken; only a genuine tie with no boot-volume match
+/// is refused, because a choice made from firmware's handle order would not be
+/// reproducible.
 ///
 /// Under the `no-guest` feature no boot manager is searched for or started: the
 /// loader's own already-loaded image handle is handed on in place of one that
@@ -103,29 +107,61 @@ pub struct GuestImage {
 /// # Errors
 ///
 /// [`LoaderError::GuestImageMissing`] if no volume contains the configured
-/// path, [`LoaderError::GuestImageAmbiguous`] if several do, or a firmware
-/// error from protocol opening or image loading. None under `no-guest`.
+/// path, [`LoaderError::GuestImageAmbiguous`] if several do and none is the
+/// boot volume, or a firmware error from protocol opening or image loading.
+/// None under `no-guest`.
 pub fn load_guest() -> Result<GuestImage, LoaderError> {
     if cfg!(feature = "no-guest") {
         return Ok(GuestImage {
             handle: boot::image_handle(),
         });
     }
-    let mut selected = None;
+    let mut matches = Vec::new();
     for handle in
         boot::find_handles::<SimpleFileSystem>().context("enumerate filesystem volumes")?
     {
-        if !contains_guest(handle)? {
-            continue;
-        }
-        if selected.replace(handle).is_some() {
-            return Err(LoaderError::GuestImageAmbiguous);
+        if contains_guest(handle)? {
+            matches.push(handle);
         }
     }
-    let volume = selected.ok_or(LoaderError::GuestImageMissing)?;
+    let on_boot_volume = boot_volume().filter(|volume| {
+        matches
+            .iter()
+            .any(|candidate| candidate.as_ptr() == volume.as_ptr())
+    });
+    let volume = match (on_boot_volume, matches.as_slice()) {
+        (Some(volume), _) => volume,
+        (None, [only]) => *only,
+        (None, []) => return Err(LoaderError::GuestImageMissing),
+        (None, _) => return Err(LoaderError::GuestImageAmbiguous),
+    };
     Ok(GuestImage {
         handle: load_from(volume)?,
     })
+}
+
+/// The volume the loader was itself loaded from, if firmware named one.
+///
+/// A boot manager on this volume is preferred over others, so the hypervisor
+/// starts the operating system beside which it was installed rather than one on
+/// a partition that merely also carries a boot manager.
+fn boot_volume() -> Option<Handle> {
+    // SAFETY: the loader's own image handle publishes `LoadedImage` for the
+    // whole boot-services phase; a `GetProtocol` open is untracked, and nothing
+    // uninstalls the interface on the single running boot processor while the
+    // returned `ScopedProtocol` is alive.
+    let image = unsafe {
+        boot::open_protocol::<LoadedImage>(
+            OpenProtocolParams {
+                handle: boot::image_handle(),
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
+    image.device()
 }
 
 /// Whether `volume` contains the configured guest image.
