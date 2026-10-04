@@ -19,6 +19,7 @@ use ept::{ENTRIES, Memory};
 use log::{error, info, warn};
 use paging::AddressSpace;
 use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
+use vmexits::Flow;
 use vmx::{BasicExitReason, EptEntry, EptPointer, ExitReason, Field, PAGE_BYTES, VmxBasic};
 use x86_64::VirtAddr;
 
@@ -155,6 +156,14 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
     check(
         "second VMCS switch and independence",
         second_vmcs_probe(&cell, space, vmx.basic()),
+    );
+    check(
+        "CPUID emulated through the dispatch loop",
+        cpuid_dispatch_probe(&mut cell),
+    );
+    check(
+        "RDMSR emulated through the dispatch loop",
+        rdmsr_dispatch_probe(&mut cell),
     );
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
@@ -416,6 +425,153 @@ fn second_vmcs_probe(cell: &Vmcs, space: &AddressSpace, basic: VmxBasic) -> bool
         let _ = instr::vmptrld(cell.region()).ok();
     }
     drop(page);
+    ok
+}
+
+/// Drives the guest `cell` describes through the real [`vmexits::dispatch`]
+/// until it makes a `VMCALL`, leaving the guest's registers in `registers`.
+///
+/// Unlike [`drive_to_vmcall`], which advances past each exit itself, this hands
+/// every exit to the dispatch loop a running hypervisor would use. Reaching the
+/// `VMCALL` means that loop emulated each exit the guest took — placing a
+/// `CPUID` or `RDMSR` result in the guest's registers — and resumed it
+/// correctly, which is what distinguishes it from a loop that only steps over
+/// the instruction.
+fn drive_dispatch(cell: &mut Vmcs, registers: &mut Registers) -> bool {
+    for entry in 1..=MAX_ENTRIES {
+        // SAFETY: `cell` is current and fully programmed, and the run loop
+        // preserves and restores the host around each entry.
+        match unsafe { run::run(cell, registers) } {
+            Entered::Failed(fail) => {
+                // SAFETY: `cell` is still current.
+                let number = unsafe { cell.read(Field::VM_INSTRUCTION_ERROR) }.unwrap_or(0);
+                error!("vmx: entry {entry} rejected ({fail}); VM-instruction-error {number}");
+                return false;
+            }
+            Entered::Exited => {
+                // SAFETY: `cell` is current and `registers` is the block the run
+                // loop just filled; `probe::install` claimed the
+                // general-protection vector during bring-up.
+                match unsafe { vmexits::dispatch(cell, registers) } {
+                    Flow::Resume => {}
+                    Flow::Vmcall => return true,
+                    Flow::Stop(stop) => {
+                        error!("vmx: dispatch stopped the guest: {stop:?}");
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    warn!("vmx: dispatch gave up after {MAX_ENTRIES} entries without a VMCALL");
+    false
+}
+
+/// A guest that runs `CPUID` leaf 0 and stashes the three vendor words it gets
+/// back, then `VMCALL`s.
+///
+/// Leaf 0 returns the processor's vendor string in `EBX`, `ECX` and `EDX`,
+/// which the host can read for itself. Moving them into registers that survive
+/// to the `VMCALL` lets the host check the dispatch loop placed the real result
+/// in the guest rather than only advancing past the instruction.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_cpuid() {
+    core::arch::naked_asm!(
+        "xor eax, eax",
+        "cpuid",
+        "mov r8, rbx",
+        "mov r9, rcx",
+        "mov r10, rdx",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b"
+    );
+}
+
+/// Runs the CPUID guest through the dispatch loop and checks the vendor words
+/// it received match the machine's own, which proves the loop emulated the exit
+/// and resumed the guest.
+fn cpuid_dispatch_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_cpuid as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; `rip` is in
+    // executable image text and `rsp` in the freshly allocated stack page.
+    if let Err(error) = unsafe { program_guest(cell, None, rip, rsp) } {
+        error!("vmx: CPUID-dispatch programming failed: {error}");
+        drop(stack);
+        return false;
+    }
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let expected = processor::cpuid(0, 0);
+    let ok = reached
+        && registers.r8 == u64::from(expected.ebx)
+        && registers.r9 == u64::from(expected.ecx)
+        && registers.r10 == u64::from(expected.edx);
+    if !ok {
+        error!(
+            "vmx: CPUID dispatch: reached {reached}, ebx {:#x} vs {:#x}",
+            registers.r8, expected.ebx
+        );
+    }
+    drop(stack);
+    ok
+}
+
+/// `IA32_EFER`, which every long-mode processor implements, so the guest's
+/// `RDMSR` of it is forwarded rather than refused.
+const IA32_EFER: u32 = 0xC000_0080;
+
+/// A guest that reads `IA32_EFER` and assembles the two halves `RDMSR` returns
+/// into one register, then `VMCALL`s.
+///
+/// `RDMSR` returns the register in `EDX:EAX`; combining them is ordinary guest
+/// code that takes no exit, so the register it ends with is the value the
+/// dispatch loop forwarded from the machine.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_rdmsr() {
+    core::arch::naked_asm!(
+        "mov ecx, {efer}",
+        "rdmsr",
+        "shl rdx, 32",
+        "or rax, rdx",
+        "mov r8, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        efer = const IA32_EFER,
+    );
+}
+
+/// Runs the RDMSR guest through the dispatch loop and checks the value it read
+/// matches the machine's own `IA32_EFER`.
+fn rdmsr_dispatch_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_rdmsr as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; `rip` is in
+    // executable image text and `rsp` in the freshly allocated stack page.
+    if let Err(error) = unsafe { program_guest(cell, None, rip, rsp) } {
+        error!("vmx: RDMSR-dispatch programming failed: {error}");
+        drop(stack);
+        return false;
+    }
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let expected = probe::read(IA32_EFER).unwrap_or(0);
+    let ok = reached && registers.r8 == expected;
+    if !ok {
+        error!(
+            "vmx: RDMSR dispatch: reached {reached}, efer {:#x} vs {expected:#x}",
+            registers.r8
+        );
+    }
+    drop(stack);
     ok
 }
 

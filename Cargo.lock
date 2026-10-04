@@ -598,6 +598,7 @@ dependencies = [
  "vcpu",
  "vlapic",
  "vmcs",
+ "vmexits",
  "vmx",
  "x86_64",
 ]
@@ -1456,6 +1457,17 @@ dependencies = [
  "thiserror",
  "vmx",
  "x86_64",
+]
+
+[[package]]
+name = "vmexits"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "probe",
+ "processor",
+ "vmcs",
+ "vmx",
 ]
 
 [[package]]
