@@ -12,9 +12,10 @@
 //! a control word is never written raw, only after being brought within what
 //! the processor allows.
 //!
-//! Unverified, like the rest of this crate's instruction-issuing code: the
-//! field encodings and the reconciliation are checked where they are defined,
-//! but nothing here has been `VMWRITE`-n on a real VMCS.
+//! The field encodings and the reconciliation are checked where they are
+//! defined, and the VMCS lifecycle here — `VMCLEAR`, `VMPTRLD`, then a
+//! `VMWRITE`/`VMREAD` round-trip of a field — has been exercised in VMX
+//! operation on an Intel processor.
 
 use vmx::{Capability, FieldEncoding, VmxBasic};
 use x86_64::PhysAddr;

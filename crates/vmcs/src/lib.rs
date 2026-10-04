@@ -6,16 +6,22 @@
 //! `VMREAD`/`VMWRITE` and the entry instructions. It is built on the `vmx`
 //! definitions the way `vcpu` is built on `svm`.
 //!
-//! # Unverified
+//! # What has run, and what has not
 //!
-//! Every instruction this crate issues faults outside VMX operation on a
-//! VMX-capable processor, which no test host here is. So unlike the `vmx`
-//! definitions, the instruction-issuing code in [`instr`] and [`enable`] is
-//! compiled and reviewed but **not executed** anywhere yet — it has never run
-//! on real hardware. What *is* tested, on the host, are the pure decisions it
-//! is built from: the flag decoding in [`error`] and the control-register
-//! reconciliation in [`fixed`]. Treat the rest as unproven until it has entered
-//! VMX operation on an Intel processor.
+//! The enabling path and the core instruction wrappers have been exercised in
+//! VMX operation on an Intel processor: [`enter`] takes a processor into VMX
+//! operation — the capability checks, the control-register reconciliation,
+//! `CR4.VMXE` and `VMXON` — and [`Vmcs::activate`] makes a VMCS current through
+//! `VMCLEAR` and `VMPTRLD`, after which a [`Vmcs::write`] and [`Vmcs::read`]
+//! round-trip a field, and `VMXOFF` leaves cleanly. Those instructions —
+//! `VMXON`, `VMCLEAR`, `VMPTRLD`, `VMWRITE`, `VMREAD`, `VMXOFF` — and the
+//! reconciliation and flag decoding they rest on are therefore proven, not just
+//! compiled.
+//!
+//! What has *not* run is guest entry: `VMLAUNCH` and `VMRESUME` are wrapped in
+//! [`instr`] but no run loop drives them yet, so they are still unproven. The
+//! pure decisions throughout — the flag decoding in [`error`] and the
+//! control-register reconciliation in [`fixed`] — are also tested on the host.
 //!
 //! # Shape
 //!

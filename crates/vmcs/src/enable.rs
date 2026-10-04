@@ -8,9 +8,10 @@
 //! stamped with the VMCS revision — and they all happen here, in the order the
 //! architecture requires.
 //!
-//! This executes privileged instructions and cannot run off a VMX-capable
-//! processor, so it is unverified on this host; the decisions it is built from
-//! — [`vmx::support`], [`crate::fixed`] — are tested where they are defined.
+//! This sequence has been exercised in VMX operation on an Intel processor:
+//! `VMXON` succeeds and a VMCS can then be made current. The decisions it is
+//! built from — [`vmx::support`], [`crate::fixed`] — are also tested where they
+//! are defined.
 
 use core::marker::PhantomData;
 

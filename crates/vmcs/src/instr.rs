@@ -3,10 +3,12 @@
 //!
 //! Each wrapper executes one instruction and captures `RFLAGS` immediately
 //! after it, before anything else can disturb the flags, and turns that into an
-//! [`Outcome`]. Nothing here is reachable under test — these instructions fault
-//! outside VMX operation — so this module is compiled and reviewed but not
-//! run on the host; the flag decoding it depends on is tested in
-//! [`crate::error`].
+//! [`Outcome`]. These instructions fault outside VMX operation, so they are not
+//! reachable from host tests; the enabling and VMCS-management wrappers
+//! ([`vmxon`], [`vmclear`], [`vmptrld`], [`vmread`], [`vmwrite`], [`vmxoff`])
+//! have instead been exercised in VMX operation on an Intel processor, while
+//! [`vmlaunch`] and [`vmresume`] have not. The flag decoding they all feed is
+//! tested in [`crate::error`].
 //!
 //! # Why the physical-address operands are taken by value and spilled
 //!
