@@ -96,6 +96,20 @@ with AMD's `VMMCALL`, which faults on Intel), a guest whose interrupts and `CR3`
 accesses are handled, and the partition and `ExitBootServices` handoff the SVM
 side builds in `partition` and `portal`.
 
+The fourth build takes the next step on this probe: it lets firmware's own code
+run as the guest rather than isolating the stub. The stub keeps firmware's
+interrupts enabled, so the pending timer interrupt is delivered through
+firmware's IDT to firmware's handler, which returns to the stub's `VMCALL`; and
+the guest's `CR3` accesses stop exiting (`vmcs::controls::relax_cr3_exiting`,
+using the true capability registers) so the handler's control-register saves
+do not stop it. Unverified until it runs: the expected outcome is still the
+`VMCALL`, now reached only after firmware's handler has executed. The portal
+path proper — the Intel portal blob (`vmcall` for AMD's `vmmcall`), a VMX
+partition owning the firmware guest's full EPT and memory, interrupt and `CR3`
+handling for a guest that is no longer a stub, SMP bring-up and the
+`ExitBootServices` handoff — remains the larger next effort, built on this
+once firmware-runs is confirmed.
+
 ## Running the self-test on Intel hardware
 
 1. Build with the on-screen log and the self-test:
