@@ -39,6 +39,9 @@ self-test battery passing in full. The checks, by area:
   answer; `CPUID` concealing the virtualization extension and the hypervisor
   leaves; `IA32_FEATURE_CONTROL` answered as firmware-locked; a control-register
   access decoded from its qualification.
+- **Concealment:** a guest executing a VMX instruction (`VMXOFF`) is refused
+  with an invalid-opcode exception delivered through its own IDT, the
+  counterpart to the AMD side's refusal of SVM instructions.
 - **Event injection:** an exception, and one carrying an error code, injected
   through a guest's own IDT and delivered to its handler.
 
