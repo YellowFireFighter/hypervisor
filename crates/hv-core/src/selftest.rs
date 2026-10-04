@@ -1906,7 +1906,11 @@ unsafe fn enable_apicv(cell: &Vmcs, vapic_phys: u64, secondary_bits: u32) -> Res
                         | PrimaryProc::ACTIVATE_SECONDARY_CONTROLS.bits(),
                 ),
         )?;
-        let reconciled = secondary_cap().reconcile(secondary_bits);
+        // Preserve the secondary controls already programmed — above all
+        // ENABLE_EPT, which the guest below runs behind — and add the APIC
+        // virtualization bits to them rather than replacing the word.
+        let existing = u32::try_from(cell.read(Field::SECONDARY_PROC_CONTROLS)?).unwrap_or(0);
+        let reconciled = secondary_cap().reconcile(existing | secondary_bits);
         cell.write(Field::SECONDARY_PROC_CONTROLS, u64::from(reconciled))?;
         cell.write(Field::VIRTUAL_APIC_ADDR, vapic_phys)?;
         cell.write(Field::TPR_THRESHOLD, 0)
@@ -1953,11 +1957,25 @@ fn apic_access_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
 
     let rip = (guest_apic_read as *const ()).addr() as u64;
     let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    let mut memory = EptMemory {
+        frames: Vec::new(),
+        space,
+    };
+    let eptp = match ept::identity(&mut memory, EPT_IDENTITY_GIB) {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            error!("vmx: APIC-access could not build the EPT: {error:?}");
+            return false;
+        }
+    };
+
     // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
-    // runs in the host address space, and the access page is a real frame named
-    // by the APIC-access address.
+    // runs behind the identity EPT, so the access page's guest-physical address
+    // is the frame the APIC-access address names, and APIC-access
+    // virtualization compares against that guest-physical address.
     let programmed = unsafe {
-        program_guest(cell, None, rip, rsp)
+        program_guest(cell, Some(eptp), rip, rsp)
             .and_then(|()| {
                 enable_apicv(
                     cell,
@@ -1984,6 +2002,7 @@ fn apic_access_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         );
     }
     drop((vapic, access, stack));
+    drop(memory);
     ok
 }
 
@@ -2006,11 +2025,25 @@ fn apic_register_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
 
     let rip = (guest_apic_read as *const ()).addr() as u64;
     let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    let mut memory = EptMemory {
+        frames: Vec::new(),
+        space,
+    };
+    let eptp = match ept::identity(&mut memory, EPT_IDENTITY_GIB) {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            error!("vmx: APIC-register could not build the EPT: {error:?}");
+            return false;
+        }
+    };
+
     // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
-    // runs in the host address space with a seeded virtual-APIC page and the
-    // access page named by the APIC-access address.
+    // runs behind the identity EPT with a seeded virtual-APIC page, and the
+    // access page's guest-physical address is the frame the APIC-access address
+    // names, which register virtualization answers from the virtual-APIC page.
     let programmed = unsafe {
-        program_guest(cell, None, rip, rsp)
+        program_guest(cell, Some(eptp), rip, rsp)
             .and_then(|()| {
                 enable_apicv(
                     cell,
@@ -2037,6 +2070,7 @@ fn apic_register_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         );
     }
     drop((vapic, access, stack));
+    drop(memory);
     ok
 }
 
@@ -2086,11 +2120,24 @@ fn vid_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
 
     let rip = (guest_idle as *const ()).addr() as u64;
     let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    let mut memory = EptMemory {
+        frames: Vec::new(),
+        space,
+    };
+    let eptp = match ept::identity(&mut memory, EPT_IDENTITY_GIB) {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            error!("vmx: VID could not build the EPT: {error:?}");
+            return false;
+        }
+    };
+
     // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
-    // runs in the host address space, its IDT and handler are host-mapped, and
-    // the virtual-APIC page carries the pending request.
+    // runs behind the identity EPT, its IDT and handler are reachable through
+    // it, and the virtual-APIC page carries the pending request.
     let programmed = unsafe {
-        program_guest(cell, None, rip, rsp)
+        program_guest(cell, Some(eptp), rip, rsp)
             .and_then(|()| {
                 enable_apicv(
                     cell,
@@ -2129,6 +2176,7 @@ fn vid_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         error!("vmx: VID: reached {reached}, marker {:#x}", registers.r8);
     }
     drop((vapic, idt, stack));
+    drop(memory);
     ok
 }
 
