@@ -34,6 +34,7 @@
 
 use alloc::{boxed::Box, vec::Vec};
 
+use apic::LocalState;
 use ept::{ENTRIES, Memory};
 use handoff::Handoff;
 use log::{error, info, warn};
@@ -44,7 +45,8 @@ use svm::{SaveArea, Segment, SegmentAttributes};
 use vmcs::{Registers, VmFail, Vmcs, controls, fixed, host, inspect, instr};
 use vmexits::{Exit, Partition, Stop};
 use vmx::{
-    AccessRights, BasicExitReason, EptEntry, Field, FieldEncoding, Interruption, PAGE_BYTES,
+    AccessRights, BasicExitReason, EptAccess, EptEntry, EptMemoryType, Field, FieldEncoding,
+    Interruption, PAGE_BYTES,
     check::{self, GuestState, Subject},
     segment::{BUSY_TSS_TYPE, TYPE_ACCESSED},
 };
@@ -56,6 +58,10 @@ const GIB: u64 = 1 << 30;
 /// The limit of the smallest 64-bit task-state segment, which is what a guest
 /// given a task register of citrine's own is described with.
 const TSS_LIMIT: u32 = 0x67;
+
+/// Bit 10 of `IA32_APIC_BASE`: the APIC is in x2APIC mode, reached through
+/// model-specific registers rather than the memory-mapped page.
+const X2APIC_ENABLE: u64 = 1 << 10;
 
 /// The alignment the portal's stack is realigned to. Firmware was captured
 /// part-way through a call, so its stack pointer need not be aligned, and the
@@ -221,6 +227,12 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff:
         Err(error) => error!("vmxboot: could not relax CR3-exiting: {error}"),
     }
 
+    // Virtualize the guest's local APIC, so its register accesses — the
+    // inter-processor interrupts that reset the machine above all — reach a
+    // virtual controller rather than the real one. Kept alive until the run
+    // ends, because the processor reads the virtual-APIC page throughout it.
+    let _apic_pages = setup_apic(space, firmware, &mut memory, eptp.root(), &cell);
+
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
     unsafe { predict(&cell) };
 
@@ -345,6 +357,177 @@ fn exit_succeeded(portal: &Portal) {
     error!(
         "vmxboot: firmware's services are gone, but the VMX path past ExitBootServices (starting the other processors, concealing the portal, interposing on devices) is not built yet; halting"
     );
+}
+
+/// Byte offsets of the local-APIC registers in the register page, which the
+/// virtual-APIC page lays out exactly as the memory-mapped controller does.
+const APIC_ID: usize = 0x20;
+/// Offset of the version register.
+const APIC_VERSION: usize = 0x30;
+/// Offset of the task-priority register, which the TPR shadow also uses.
+const APIC_TASK_PRIORITY: usize = 0x80;
+/// Offset of the processor-priority register.
+const APIC_PROCESSOR_PRIORITY: usize = 0xA0;
+/// Offset of the logical-destination register.
+const APIC_LOGICAL_DESTINATION: usize = 0xD0;
+/// Offset of the destination-format register.
+const APIC_DESTINATION_FORMAT: usize = 0xE0;
+/// Offset of the spurious-interrupt-vector register.
+const APIC_SPURIOUS: usize = 0xF0;
+/// Offset of the first in-service-register word.
+const APIC_IN_SERVICE: usize = 0x100;
+/// Offset of the first trigger-mode-register word.
+const APIC_TRIGGER_MODE: usize = 0x180;
+/// Offset of the first interrupt-request-register word.
+const APIC_INTERRUPT_REQUEST: usize = 0x200;
+/// Offset of the error-status register.
+const APIC_ERROR_STATUS: usize = 0x280;
+/// Offset of the corrected-machine-check local-vector-table entry.
+const APIC_LVT_CMCI: usize = 0x2F0;
+/// Offset of the low half of the interrupt-command register.
+const APIC_COMMAND_LOW: usize = 0x300;
+/// Offset of the high half of the interrupt-command register.
+const APIC_COMMAND_HIGH: usize = 0x310;
+/// Offset of the timer local-vector-table entry.
+const APIC_LVT_TIMER: usize = 0x320;
+/// Offset of the thermal-sensor local-vector-table entry.
+const APIC_LVT_THERMAL: usize = 0x330;
+/// Offset of the performance-counter local-vector-table entry.
+const APIC_LVT_PERFORMANCE: usize = 0x340;
+/// Offset of the first interrupt-pin local-vector-table entry.
+const APIC_LVT_LINT0: usize = 0x350;
+/// Offset of the second interrupt-pin local-vector-table entry.
+const APIC_LVT_LINT1: usize = 0x360;
+/// Offset of the error local-vector-table entry.
+const APIC_LVT_ERROR: usize = 0x370;
+/// Offset of the timer's initial-count register.
+const APIC_TIMER_INITIAL_COUNT: usize = 0x380;
+/// Offset of the timer's current-count register.
+const APIC_TIMER_CURRENT_COUNT: usize = 0x390;
+/// Offset of the timer's divide-configuration register.
+const APIC_TIMER_DIVIDE: usize = 0x3E0;
+/// Bytes between one 32-bit register word and the next in a bank.
+const APIC_REGISTER_STRIDE: usize = 0x10;
+
+/// The two 32-bit halves of a 64-bit value, low then high, without a narrowing
+/// cast.
+fn halves(value: u64) -> [u32; 2] {
+    let bytes = value.to_le_bytes();
+    [
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+    ]
+}
+
+/// Seeds a virtual-APIC page with the controller state firmware was captured
+/// with, so the guest reads back what it last left in each register rather than
+/// the zeros of a fresh page.
+///
+/// Each value goes to the offset the memory-mapped controller holds it at,
+/// which is the layout the virtual-APIC page shares. The interrupt-command
+/// register is the one that spans two registers; everything else is a single
+/// 32-bit word, and the request, in-service and trigger-mode banks are eight
+/// words apart by the register stride.
+fn seed_vapic(page: &mut Page, local: &LocalState) {
+    let mut put = |offset: usize, value: u32| {
+        page.0[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    };
+    put(APIC_ID, local.id);
+    put(APIC_VERSION, local.version);
+    put(APIC_TASK_PRIORITY, local.task_priority);
+    put(APIC_PROCESSOR_PRIORITY, local.processor_priority);
+    put(APIC_LOGICAL_DESTINATION, local.logical_destination);
+    put(APIC_DESTINATION_FORMAT, local.destination_format);
+    put(APIC_SPURIOUS, local.spurious);
+    put(APIC_ERROR_STATUS, local.error_status);
+    put(APIC_LVT_CMCI, local.lvt_corrected_machine_check);
+    let [command_low, command_high] = halves(local.command);
+    put(APIC_COMMAND_LOW, command_low);
+    put(APIC_COMMAND_HIGH, command_high);
+    put(APIC_LVT_TIMER, local.lvt_timer);
+    put(APIC_LVT_THERMAL, local.lvt_thermal);
+    put(APIC_LVT_PERFORMANCE, local.lvt_performance);
+    put(APIC_LVT_LINT0, local.lvt_lint0);
+    put(APIC_LVT_LINT1, local.lvt_lint1);
+    put(APIC_LVT_ERROR, local.lvt_error);
+    put(APIC_TIMER_INITIAL_COUNT, local.timer_initial_count);
+    put(APIC_TIMER_CURRENT_COUNT, local.timer_current_count);
+    put(APIC_TIMER_DIVIDE, local.timer_divide);
+    for (index, word) in local.in_service.iter().enumerate() {
+        put(APIC_IN_SERVICE + index * APIC_REGISTER_STRIDE, *word);
+    }
+    for (index, word) in local.trigger_mode.iter().enumerate() {
+        put(APIC_TRIGGER_MODE + index * APIC_REGISTER_STRIDE, *word);
+    }
+    for (index, word) in local.interrupt_request.iter().enumerate() {
+        put(APIC_INTERRUPT_REQUEST + index * APIC_REGISTER_STRIDE, *word);
+    }
+}
+
+/// Virtualizes the guest's local APIC: seeds a virtual-APIC page from the
+/// captured controller, remaps the guest's APIC page to a 4-KiB access page the
+/// processor watches, and turns the APIC-virtualization controls on.
+///
+/// Returns the two pages, which the caller keeps alive for the run because the
+/// processor reads the virtual-APIC page throughout it. On any failure it logs
+/// and returns `None`, leaving the guest to reach the real controller — which
+/// is worse but is the state the probe was in before.
+fn setup_apic(
+    space: &AddressSpace,
+    firmware: &FirmwareContext,
+    memory: &mut EptFrames,
+    eptp_root: u64,
+    cell: &Vmcs,
+) -> Option<(Box<Page>, Box<Page>)> {
+    // SAFETY: this runs in VMX operation, so the capability register exists.
+    if !unsafe { controls::apic_virtualization_available() } {
+        warn!(
+            "vmxboot: this processor cannot virtualize the APIC; the guest would reach the real one"
+        );
+        return None;
+    }
+    // x2APIC reaches the controller through model-specific registers rather than
+    // the page this virtualizes, so warn where firmware left it in that mode:
+    // the MMIO virtualization below does not cover it.
+    if firmware.interrupts.base & X2APIC_ENABLE != 0 {
+        warn!(
+            "vmxboot: firmware left the APIC in x2APIC mode; the guest reaches it through MSRs, which this virtualization does not yet cover"
+        );
+    }
+    let mut vapic = Page::zeroed();
+    let access = Page::zeroed();
+    seed_vapic(&mut vapic, &firmware.interrupts.local);
+    let at = |page: &Page| VirtAddr::new(core::ptr::from_ref(&page.0).addr() as u64);
+    let (Ok(vapic_phys), Ok(access_phys)) =
+        (space.translate(at(&vapic)), space.translate(at(&access)))
+    else {
+        error!("vmxboot: could not translate the APIC virtualization pages");
+        return None;
+    };
+    let apic_page = firmware.interrupts.base & !(PAGE_BYTES as u64 - 1);
+    if let Err(error) = ept::map(
+        memory,
+        eptp_root,
+        apic_page,
+        access_phys.as_u64(),
+        EptAccess::READ | EptAccess::WRITE,
+        EptMemoryType::Uncacheable,
+    ) {
+        error!("vmxboot: could not map the guest APIC page to the access page: {error:?}");
+        return None;
+    }
+    // SAFETY: `cell` is the current VMCS in VMX operation, and `program` wrote
+    // the controls this adds to.
+    let enabled =
+        unsafe { controls::virtualize_apic(cell, vapic_phys.as_u64(), access_phys.as_u64()) };
+    if let Err(error) = enabled {
+        error!("vmxboot: could not enable APIC virtualization: {error}");
+        return None;
+    }
+    info!(
+        "vmxboot: guest APIC virtualized; accesses to {apic_page:#x} reach the virtual-APIC page, not the real controller"
+    );
+    Some((vapic, access))
 }
 
 /// Programs the guest half of the current VMCS from a captured firmware save
