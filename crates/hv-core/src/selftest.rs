@@ -97,8 +97,22 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
         }
     };
 
-    // A battery of checks: each logs PASS or FAIL and the tally at the end sums
-    // them, so one boot exercises many things rather than one.
+    battery(&mut cell, space, vmx.basic());
+
+    // SAFETY: `cell` is current, so clearing it leaves no current VMCS, which is
+    // the precondition for leaving VMX operation.
+    unsafe {
+        let _ = instr::vmclear(cell.region()).ok();
+        leave();
+    }
+    info!("vmx: self-test complete");
+    true
+}
+
+/// Runs every check against the current VMCS `cell`, logging each `[PASS]` or
+/// `[FAIL]` and a final tally, so one boot exercises many things rather than
+/// one. `basic` is this processor's `IA32_VMX_BASIC`, read while entering.
+fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
     let mut passed = 0_u32;
     let mut total = 0_u32;
     let mut check = |name: &str, ok: bool| {
@@ -116,7 +130,7 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
     check("CR4.VMXE set by the enable path", cr4_vmxe_set());
     check(
         "VMX basic region fits a page",
-        (1..=PAGE_BYTES).contains(&(vmx.basic().region_bytes() as usize)),
+        (1..=PAGE_BYTES).contains(&(basic.region_bytes() as usize)),
     );
 
     // Field round-trips across every width, which exercises the encoding of
@@ -124,58 +138,61 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
     // was written.
     check(
         "16-bit field round-trip",
-        roundtrip(&cell, Field::GUEST_ES_SELECTOR, 0x1234),
+        roundtrip(cell, Field::GUEST_ES_SELECTOR, 0x1234),
     );
     check(
         "32-bit field round-trip",
-        roundtrip(&cell, Field::GUEST_ES_LIMIT, 0xDEAD_BEEF),
+        roundtrip(cell, Field::GUEST_ES_LIMIT, 0xDEAD_BEEF),
     );
     check(
         "64-bit field round-trip",
-        roundtrip(&cell, Field::TSC_OFFSET, 0x1122_3344_5566_7788),
+        roundtrip(cell, Field::TSC_OFFSET, 0x1122_3344_5566_7788),
     );
     check(
         "natural-width field round-trip",
-        roundtrip(&cell, Field::GUEST_RIP, 0x0000_0000_0040_1000),
+        roundtrip(cell, Field::GUEST_RIP, 0x0000_0000_0040_1000),
     );
     check(
         "guest launch, resume across CPUIDs, VMCALL",
-        entry_probe(&mut cell),
+        entry_probe(cell),
     );
-    check("guest GPRs saved on exit", register_save_probe(&mut cell));
+    check("guest GPRs saved on exit", register_save_probe(cell));
     // SAFETY: we reached here only by entering VMX operation, so this is a
     // VMX-capable processor and the capability registers exist.
     if unsafe { controls::ept_available() } {
         check(
             "guest launch under EPT (second translation)",
-            ept_probe(&mut cell, space),
+            ept_probe(cell, space),
         );
     } else {
         warn!("vmx: EPT not available on this processor; skipping the EPT guest check");
     }
     check(
         "second VMCS switch and independence",
-        second_vmcs_probe(&cell, space, vmx.basic()),
+        second_vmcs_probe(cell, space, basic),
     );
     check(
         "CPUID emulated through the dispatch loop",
-        cpuid_dispatch_probe(&mut cell),
+        cpuid_dispatch_probe(cell),
     );
     check(
         "RDMSR emulated through the dispatch loop",
-        rdmsr_dispatch_probe(&mut cell),
+        rdmsr_dispatch_probe(cell),
+    );
+    check(
+        "WRMSR forwarded through the dispatch loop",
+        wrmsr_dispatch_probe(cell),
+    );
+    check(
+        "CPUID conceals the virtualization extension",
+        cpuid_conceal_probe(cell),
+    );
+    check(
+        "IA32_FEATURE_CONTROL answered as firmware-locked",
+        feature_control_probe(cell),
     );
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
-
-    // SAFETY: `cell` is current, so clearing it leaves no current VMCS, which is
-    // the precondition for leaving VMX operation.
-    unsafe {
-        let _ = instr::vmclear(cell.region()).ok();
-        leave();
-    }
-    info!("vmx: self-test complete");
-    true
 }
 
 /// A guest that exits three times: two `CPUID`s, each an unconditional VM exit,
@@ -568,6 +585,184 @@ fn rdmsr_dispatch_probe(cell: &mut Vmcs) -> bool {
     if !ok {
         error!(
             "vmx: RDMSR dispatch: reached {reached}, efer {:#x} vs {expected:#x}",
+            registers.r8
+        );
+    }
+    drop(stack);
+    ok
+}
+
+/// `IA32_KERNEL_GS_BASE`, which every long-mode processor implements and holds
+/// an arbitrary canonical value, so a `WRMSR`/`RDMSR` round-trip through it
+/// proves the forwarding without depending on an optional register.
+const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+/// The low half of the value the WRMSR guest round-trips.
+const WRMSR_MARKER_LOW: u32 = 0x1122_3344;
+/// The high half of that value. Kept below bit 47 so the whole is canonical and
+/// `WRMSR` accepts it.
+const WRMSR_MARKER_HIGH: u32 = 0x0000_7FFF;
+
+/// A guest that writes a marker into `IA32_KERNEL_GS_BASE` with `WRMSR` and
+/// reads it back with `RDMSR`, then `VMCALL`s with what it read.
+///
+/// Both accesses exit and are forwarded by the dispatch loop, so the value that
+/// comes back having survived the round trip is proof the `WRMSR` path wrote
+/// the machine's register and the `RDMSR` path read it.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_wrmsr() {
+    core::arch::naked_asm!(
+        "mov ecx, {msr}",
+        "mov eax, {low}",
+        "mov edx, {high}",
+        "wrmsr",
+        "mov ecx, {msr}",
+        "rdmsr",
+        "shl rdx, 32",
+        "or rax, rdx",
+        "mov r8, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        msr = const IA32_KERNEL_GS_BASE,
+        low = const WRMSR_MARKER_LOW,
+        high = const WRMSR_MARKER_HIGH,
+    );
+}
+
+/// Runs the WRMSR guest through the dispatch loop and checks the value read
+/// back matches the one written.
+fn wrmsr_dispatch_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_wrmsr as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; `rip` is in
+    // executable image text and `rsp` in the freshly allocated stack page.
+    if let Err(error) = unsafe { program_guest(cell, None, rip, rsp) } {
+        error!("vmx: WRMSR-dispatch programming failed: {error}");
+        drop(stack);
+        return false;
+    }
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let expected = (u64::from(WRMSR_MARKER_HIGH) << 32) | u64::from(WRMSR_MARKER_LOW);
+    let ok = reached && registers.r8 == expected;
+    if !ok {
+        error!(
+            "vmx: WRMSR dispatch: reached {reached}, read {:#x} vs {expected:#x}",
+            registers.r8
+        );
+    }
+    drop(stack);
+    ok
+}
+
+/// `CPUID.01H:ECX[5]`, the VMX bit, and `[31]`, the hypervisor-present bit —
+/// the two the concealment clears.
+const CPUID_VMX_AND_HYPERVISOR: u64 = (1 << 5) | (1 << 31);
+
+/// A guest that reads the standard feature leaf and the first hypervisor leaf,
+/// stashing the feature `ECX` and the OR of every hypervisor-leaf word, then
+/// `VMCALL`s.
+///
+/// The feature `ECX` should have the virtualization and hypervisor-present bits
+/// clear, and the hypervisor leaf should read as all zero — which is what the
+/// concealment in the dispatch loop makes of them.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_cpuid_conceal() {
+    core::arch::naked_asm!(
+        "mov eax, 1",
+        "cpuid",
+        "mov r8, rcx",
+        "mov eax, 0x40000000",
+        "cpuid",
+        "mov r9, rax",
+        "or r9, rbx",
+        "or r9, rcx",
+        "or r9, rdx",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b"
+    );
+}
+
+/// Runs the concealment guest through the dispatch loop and checks the
+/// virtualization extension is hidden: the two feature bits clear and the
+/// hypervisor leaf empty.
+fn cpuid_conceal_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_cpuid_conceal as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; `rip` is in
+    // executable image text and `rsp` in the freshly allocated stack page.
+    if let Err(error) = unsafe { program_guest(cell, None, rip, rsp) } {
+        error!("vmx: CPUID-conceal programming failed: {error}");
+        drop(stack);
+        return false;
+    }
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let ok = reached && registers.r8 & CPUID_VMX_AND_HYPERVISOR == 0 && registers.r9 == 0;
+    if !ok {
+        error!(
+            "vmx: CPUID conceal: reached {reached}, feature ecx {:#x}, hv-leaf or {:#x}",
+            registers.r8, registers.r9
+        );
+    }
+    drop(stack);
+    ok
+}
+
+/// `IA32_FEATURE_CONTROL`, which the dispatch answers as firmware-locked.
+const IA32_FEATURE_CONTROL: u32 = 0x3A;
+/// Bit 0, the lock, which the concealed value sets.
+const FEATURE_CONTROL_LOCK: u64 = 1 << 0;
+/// Bits 1 and 2, the two `VMXON` permissions, which the concealed value clears.
+const FEATURE_CONTROL_VMXON: u64 = (1 << 1) | (1 << 2);
+
+/// A guest that reads `IA32_FEATURE_CONTROL` and `VMCALL`s with it.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_feature_control() {
+    core::arch::naked_asm!(
+        "mov ecx, {msr}",
+        "rdmsr",
+        "shl rdx, 32",
+        "or rax, rdx",
+        "mov r8, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        msr = const IA32_FEATURE_CONTROL,
+    );
+}
+
+/// Runs the feature-control guest through the dispatch loop and checks the
+/// register is answered as firmware-locked: the lock set, both `VMXON`
+/// permissions clear.
+fn feature_control_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_feature_control as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; `rip` is in
+    // executable image text and `rsp` in the freshly allocated stack page.
+    if let Err(error) = unsafe { program_guest(cell, None, rip, rsp) } {
+        error!("vmx: feature-control programming failed: {error}");
+        drop(stack);
+        return false;
+    }
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let ok = reached
+        && registers.r8 & FEATURE_CONTROL_LOCK != 0
+        && registers.r8 & FEATURE_CONTROL_VMXON == 0;
+    if !ok {
+        error!(
+            "vmx: feature control: reached {reached}, value {:#x}",
             registers.r8
         );
     }
