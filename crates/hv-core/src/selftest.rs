@@ -20,7 +20,7 @@ use log::{error, info, warn};
 use paging::AddressSpace;
 use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
 use vmx::{
-    BasicExitReason, EptEntry, EptPointer, ExitReason, Field, Interruption, PAGE_BYTES,
+    BasicExitReason, EptEntry, EptPointer, ExitReason, Field, Interruption, PAGE_BYTES, VmxBasic,
     event::Kind as EventKind,
 };
 use x86_64::VirtAddr;
@@ -162,6 +162,10 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
     } else {
         warn!("vmx: EPT not available on this processor; skipping the EPT guest check");
     }
+    check(
+        "second VMCS switch and independence",
+        second_vmcs_probe(&cell, space, vmx.basic()),
+    );
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
 
@@ -432,6 +436,39 @@ fn injection_probe(cell: &mut Vmcs) -> bool {
         }
     };
     drop(stack);
+    ok
+}
+
+/// Makes a second VMCS current, round-trips a field in it, then restores the
+/// first — exercising VMCS switching and that each VMCS is independent.
+fn second_vmcs_probe(cell: &Vmcs, space: &AddressSpace, basic: VmxBasic) -> bool {
+    let mut page = Page::zeroed();
+    let virt = VirtAddr::new(core::ptr::from_ref(&page.0).addr() as u64);
+    let Ok(phys) = space.translate(virt) else {
+        error!("vmx: second VMCS page could not be translated");
+        return false;
+    };
+
+    // SAFETY: VMX operation is live, the page is an exclusively-owned,
+    // page-sized VMCS region, and `basic` is this processor's own.
+    let second = match unsafe { Vmcs::activate(page.0.as_mut_ptr().cast(), phys, basic) } {
+        Ok(second) => second,
+        Err(error) => {
+            error!("vmx: second VMCS activate failed: {error}");
+            return false;
+        }
+    };
+    // The second VMCS is current now; a field written here must read back from
+    // it, independent of the first.
+    let ok = roundtrip(&second, Field::GUEST_RSP, 0xCAFE_0000_1000);
+
+    // SAFETY: `second` is current; clearing it and reloading the first leaves
+    // the first current again for the caller's cleanup.
+    unsafe {
+        let _ = instr::vmclear(second.region()).ok();
+        let _ = instr::vmptrld(cell.region()).ok();
+    }
+    drop(page);
     ok
 }
 
