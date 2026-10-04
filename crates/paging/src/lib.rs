@@ -1,4 +1,4 @@
-//! Address space and physical memory management for pulzar.
+//! Address space and physical memory management for citrine.
 //!
 //! The hypervisor owns exactly one region of physical memory — the chunk
 //! firmware reserved for it — and one half of one virtual address space. This
@@ -165,7 +165,7 @@ pub enum PagingError {
     /// `CR4.LA57` is set. Under 5-level paging the root table is a PML5, and
     /// every walk this crate performs would be off by a level; refusing to boot
     /// is the only safe response.
-    #[error("5-level paging is enabled, which pulzar does not support")]
+    #[error("5-level paging is enabled, which citrine does not support")]
     FiveLevelPaging,
     /// The processor has no `NX`, so no mapping could be made non-executable.
     #[error("the processor does not support the no-execute bit")]
@@ -252,7 +252,7 @@ pub enum PagingError {
     },
     /// Firmware already has a high-half mapping, so the halves cannot simply be
     /// combined.
-    #[error("firmware already maps PML4 entry {index}, which pulzar needs")]
+    #[error("firmware already maps PML4 entry {index}, which citrine needs")]
     HighHalfInUse {
         /// The occupied entry.
         index: usize,
@@ -332,7 +332,7 @@ pub enum PagingError {
     /// a translation reaches, and this crate's shootdowns do not enumerate
     /// contexts; running under them would leave stale translations in every
     /// context but the current one.
-    #[error("process-context identifiers are enabled, which pulzar does not support")]
+    #[error("process-context identifiers are enabled, which citrine does not support")]
     PcidEnabled,
     /// No source of entropy the placement of the high half may be drawn from.
     #[error("the processor offers no hardware entropy source")]

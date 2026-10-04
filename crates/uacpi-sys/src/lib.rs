@@ -1,6 +1,6 @@
 //! Raw bindings to uACPI, built from the submodule pinned in this workspace.
 //!
-//! uACPI is the ACPI implementation pulzar reads firmware's tables through and
+//! uACPI is the ACPI implementation citrine reads firmware's tables through and
 //! evaluates its bytecode with. This crate is the boundary and nothing more: it
 //! compiles the C, declares what the C exposes, and stops. It implements none
 //! of the callbacks uACPI needs from its host — those are the host's, because
@@ -94,7 +94,7 @@ impl Status {
     /// Everything went as asked.
     pub const OK: Self = Self(raw::UACPI_STATUS_OK);
 
-    /// A host callback declining because pulzar does not implement it.
+    /// A host callback declining because citrine does not implement it.
     pub const UNIMPLEMENTED: Self = Self(raw::UACPI_STATUS_UNIMPLEMENTED);
 
     /// A host callback declining because the machine has no such thing.
@@ -112,7 +112,7 @@ impl Status {
     /// A wait that ran out of time, which is not an error for every caller.
     pub const TIMEOUT: Self = Self(raw::UACPI_STATUS_TIMEOUT);
 
-    /// A host callback declining because pulzar will not do this.
+    /// A host callback declining because citrine will not do this.
     pub const DENIED: Self = Self(raw::UACPI_STATUS_DENIED);
 
     /// A host callback declining for a reason that is the host's own bug.

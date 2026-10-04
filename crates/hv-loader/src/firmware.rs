@@ -50,7 +50,7 @@ use crate::{
 ///
 /// At the volume's root, beside the loader staged as the removable-media boot
 /// program, and nowhere the guest's own boot manager is kept.
-const IMAGE_PATH: &uefi::CStr16 = cstr16!("\\pulzar.efi");
+const IMAGE_PATH: &uefi::CStr16 = cstr16!("\\citrine.efi");
 
 /// UEFI path of the image the initial guest starts: the Windows boot manager,
 /// so a machine that boots Windows starts it behind the hypervisor from where
@@ -272,7 +272,7 @@ pub fn reserve() -> Result<Reserved, LoaderError> {
 /// memory out under that type, the request is retried as
 /// [`MemoryType::RUNTIME_SERVICES_DATA`]: the type every implementation must
 /// support, that also survives `ExitBootServices` and is never reclaimed, and
-/// that pulzar owns outright anyway because it never calls the runtime
+/// that citrine owns outright anyway because it never calls the runtime
 /// services.
 ///
 /// Firmware only promises page alignment, so the request is one alignment

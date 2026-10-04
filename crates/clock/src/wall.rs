@@ -35,7 +35,7 @@ const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
 
 /// Seconds in a day. Leap seconds are not counted: Unix time does not have
-/// them, and no clock pulzar reads reports one.
+/// them, and no clock citrine reads reports one.
 const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
 
 /// Days in the calendar's 400-year cycle, after which every date, weekday and

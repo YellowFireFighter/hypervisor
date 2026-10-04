@@ -17,7 +17,7 @@
 //! and the two registers only one of them has are a type only that one can
 //! reach.
 //!
-//! The choice is not a preference. Pulzar hands the machine on to firmware and
+//! The choice is not a preference. Citrine hands the machine on to firmware and
 //! goes on emulating a controller for it, and the emulated one's logical
 //! destination register has to agree with the real one — because the I/O
 //! controllers are passed through, and hardware matches a passed-through

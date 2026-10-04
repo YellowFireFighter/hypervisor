@@ -1,6 +1,6 @@
 [package]
 name = "paging"
-description = "Address-space and frame-allocation subsystem for the pulzar hypervisor"
+description = "Address-space and frame-allocation subsystem for the citrine hypervisor"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

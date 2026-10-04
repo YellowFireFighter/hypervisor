@@ -195,7 +195,7 @@ bitflags! {
         ///
         /// Reported rather than acted on: this extension is mutually exclusive
         /// with the enable bit that gives the hardware an *unencrypted* guest's
-        /// controller, which is the only kind pulzar runs, so nothing chooses on
+        /// controller, which is the only kind citrine runs, so nothing chooses on
         /// it. It is worth naming because it is the bit that decides which of
         /// the two mechanisms a machine has, and the boot log says which.
         const SECURE_AVIC = 1 << 26;

@@ -1,6 +1,6 @@
 [package]
 name = "processor"
-description = "What the processor pulzar runs on can do, asked once and cached"
+description = "What the processor citrine runs on can do, asked once and cached"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

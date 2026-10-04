@@ -135,7 +135,7 @@ pub enum MemoryError {
     },
     /// The guest is translating through five levels of page table, which
     /// nothing here walks — as nothing here runs under, either.
-    #[error("the guest is running with five-level paging, which pulzar does not walk")]
+    #[error("the guest is running with five-level paging, which citrine does not walk")]
     FiveLevelGuest,
     /// A range runs off the end of the physical address space.
     #[error("a {bytes:#x}-byte range at {gpa:#x} leaves the physical address space")]

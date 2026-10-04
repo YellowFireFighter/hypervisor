@@ -1,6 +1,6 @@
 # Intel VMX port — status and roadmap
 
-pulzar is an AMD SVM hypervisor. An Intel VMX backend is being built alongside
+citrine is an AMD SVM hypervisor. An Intel VMX backend is being built alongside
 the SVM one so a single image can eventually run on either vendor. The
 foundational layers exist and are proven on Intel hardware; the higher layers
 that a real OS guest needs do not yet exist. This file is the map of what is
@@ -52,7 +52,7 @@ check, unverified until it runs on Intel.
 1. Build with the on-screen log and the self-test:
    `cargo build -p hv-loader -p hv-core --features hv-loader/efifb,hv-core/efifb,hv-core/vmx-selftest`
 2. Stage a FAT EFI system partition: `EFI/BOOT/BOOTX64.EFI` ← `hv-loader.efi`,
-   `\pulzar.efi` ← `hv-core.efi`, and any valid UEFI PE at
+   `\citrine.efi` ← `hv-core.efi`, and any valid UEFI PE at
    `\EFI\Microsoft\Boot\bootmgfw.efi` (e.g. a UEFI shell) so the loader's
    guest-manager preload succeeds.
 3. For VirtualBox, convert the FAT image to VDI (`qemu-img convert -O vdi`) and

@@ -1,6 +1,6 @@
 [package]
 name = "hypercall"
-description = "The call a guest makes into the pulzar hypervisor, and what comes back"
+description = "The call a guest makes into the citrine hypervisor, and what comes back"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -93,7 +93,7 @@ impl Vlapic {
     ///
     /// Called once, before the guest has run, on the controller belonging to
     /// the processor the capture was taken on. What it is for is that
-    /// pulzar does not boot a fresh guest: it re-enters the firmware it
+    /// citrine does not boot a fresh guest: it re-enters the firmware it
     /// found, and firmware expects its controller to hold what it left
     /// there. Every register below was read before anything overwrote it
     /// and would otherwise be gone — the real controller has since been

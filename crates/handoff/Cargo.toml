@@ -1,6 +1,6 @@
 [package]
 name = "handoff"
-description = "Boot protocol handed from hv-loader to the pulzar hypervisor image"
+description = "Boot protocol handed from hv-loader to the citrine hypervisor image"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

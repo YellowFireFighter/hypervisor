@@ -9,7 +9,7 @@
 //! because entering a guest is a per-processor act and deciding what a guest
 //! *is* is not.
 //!
-//! Pulzar runs one guest. The type is still a partition rather than a global,
+//! Citrine runs one guest. The type is still a partition rather than a global,
 //! because the interesting properties are all about which guest a thing belongs
 //! to, and a design that answers that with "the only one" has to be taken apart
 //! before it can answer anything else.

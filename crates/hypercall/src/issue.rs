@@ -4,15 +4,15 @@
 //! is as usable from an ordinary process as from a kernel, and nothing here
 //! needs to know which it is in.
 //!
-//! # What happens where there is no pulzar underneath
+//! # What happens where there is no citrine underneath
 //!
 //! The instruction is not one every machine has. A processor with no
 //! virtualization extension enabled, and any hypervisor that does not intercept
 //! it, raises an invalid-opcode exception — which reaches a hosted caller as
 //! the signal its operating system delivers for one, and ends the process.
-//! There is no way around it from inside the guest: pulzar deliberately answers
-//! `CPUID` as though nothing were underneath the guest, so no feature bit
-//! exists to ask first. A caller that might not be running under this
+//! There is no way around it from inside the guest: citrine deliberately
+//! answers `CPUID` as though nothing were underneath the guest, so no feature
+//! bit exists to ask first. A caller that might not be running under this
 //! hypervisor has to be prepared for the fault, and every caller here is a
 //! debugging tool run on purpose.
 //!
@@ -99,7 +99,7 @@ pub enum Answer {
     /// A word this interface does not define, carried as it came back.
     ///
     /// Which is what a caller gets from a hypervisor that intercepts the
-    /// instruction and is not this one, and from a pulzar built with statuses
+    /// instruction and is not this one, and from a citrine built with statuses
     /// this reader does not have.
     Unknown(u64),
 }

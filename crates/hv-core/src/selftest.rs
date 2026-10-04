@@ -6,7 +6,7 @@
 //! no guest and no world switch — enter VMX operation, make a VMCS current,
 //! `VMWRITE` a field and `VMREAD` it back — on a real processor, and reports
 //! whether it worked. It is built only behind the `vmx-selftest` feature, runs
-//! early in bring-up and is followed by a halt, because the rest of pulzar is
+//! early in bring-up and is followed by a halt, because the rest of citrine is
 //! AMD SVM and cannot run on the Intel machine this is meant for.
 //!
 //! Everything here is reported through [`log`], so a build that can show it is

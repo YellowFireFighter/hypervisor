@@ -193,12 +193,12 @@ impl ExitCode {
     /// handle on its own.
     pub const AVIC_NOACCEL: Self = Self(0x402);
     /// An encrypted guest made an explicit call to the hypervisor, part of an
-    /// extension pulzar does not implement.
+    /// extension citrine does not implement.
     pub const VMGEXIT: Self = Self(0x403);
     /// The control block held state the processor refuses, and no guest
     /// instruction ran. A hypervisor bug rather than anything the guest did.
     pub const INVALID: Self = Self(u64::MAX);
-    /// The encrypted state area was busy, part of an extension pulzar does not
+    /// The encrypted state area was busy, part of an extension citrine does not
     /// implement.
     pub const BUSY: Self = Self(u64::MAX - 1);
     /// The other thread of this core was not idle when the guest required it to

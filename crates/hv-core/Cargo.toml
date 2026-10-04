@@ -5,7 +5,7 @@ cargo-features = ["per-package-target"]
 
 [package]
 name = "hv-core"
-description = "Hypervisor image for pulzar, loaded and entered by hv-loader"
+description = "Hypervisor image for citrine, loaded and entered by hv-loader"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -85,7 +85,7 @@ splash = []
 
 # A one-shot check, on an Intel processor, that this build can enter VMX
 # operation and that the VMCS instruction wrappers round-trip. Runs early in
-# bring-up and then halts, because the rest of pulzar is AMD SVM and cannot
+# bring-up and then halts, because the rest of citrine is AMD SVM and cannot
 # proceed on an Intel machine. For bringing the unverified Intel path up on
 # real hardware; off in every ordinary build.
 vmx-selftest = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits", "dep:hypercall"]

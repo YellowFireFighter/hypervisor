@@ -1,4 +1,4 @@
-//! Host-side task runner for the pulzar workspace.
+//! Host-side task runner for the citrine workspace.
 //!
 //! Builds the UEFI boot media and drives QEMU so contributors never manage
 //! artifacts by hand: the EFI system partition is staged as a plain directory
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// Task runner for building pulzar boot media and running it under QEMU.
+/// Task runner for building citrine boot media and running it under QEMU.
 #[derive(Parser)]
 #[command(bin_name = "cargo xtask")]
 enum Cli {
@@ -82,9 +82,10 @@ enum Cli {
         /// Boot the guest disk directly, with no hypervisor in front of it.
         ///
         /// The same machine, the same disk and the same processor topology,
-        /// with pulzar taken out — which is the only way to tell a fault of the
-        /// hypervisor's from one the guest has on this hardware anyway. Nothing
-        /// is built, because nothing of pulzar's is used.
+        /// with citrine taken out — which is the only way to tell a fault of
+        /// the hypervisor's from one the guest has on this hardware
+        /// anyway. Nothing is built, because nothing of citrine's is
+        /// used.
         #[arg(long)]
         no_hypervisor: bool,
         /// Draw the log on the screen instead of the boot screen, as

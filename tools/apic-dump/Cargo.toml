@@ -1,6 +1,6 @@
 [package]
 name = "apic-dump"
-description = "Reads a pulzar guest's interrupt controllers out of the hypervisor underneath it"
+description = "Reads a citrine guest's interrupt controllers out of the hypervisor underneath it"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

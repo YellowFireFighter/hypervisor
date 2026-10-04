@@ -207,7 +207,7 @@ pub enum Resumption {
     /// about `MCG_STATUS` and the error banks: the saved instruction pointer
     /// may be reliable, the context may be uncorrupted, the error may be
     /// contained. Answering it needs a subsystem that reads and clears that
-    /// state, and pulzar has none — so every machine check is fatal here as a
+    /// state, and citrine has none — so every machine check is fatal here as a
     /// stated policy, not because the processor said so.
     FailStop,
 }

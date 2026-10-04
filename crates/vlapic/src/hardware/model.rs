@@ -12,7 +12,7 @@
 //!
 //! # Why it is derived rather than chosen
 //!
-//! Pulzar passes `CPUID` through. A guest therefore reads the real vendor,
+//! Citrine passes `CPUID` through. A guest therefore reads the real vendor,
 //! family and model of the processor it is running on, and every optional
 //! feature that processor reports. Inventing a controller that contradicts that
 //! would be inventing a processor: a controller offering a
@@ -35,7 +35,7 @@
 //!
 //! # Whose manual this follows, and why there is no vendor dispatch
 //!
-//! AMD's. Pulzar is an SVM hypervisor, and SVM exists on AMD and on Hygon,
+//! AMD's. Citrine is an SVM hypervisor, and SVM exists on AMD and on Hygon,
 //! whose parts are AMD-derived and follow AMD's manual; no other vendor
 //! implements it, so no other vendor's machine can execute this code. The two
 //! places the vendors' controllers genuinely differ are therefore settled

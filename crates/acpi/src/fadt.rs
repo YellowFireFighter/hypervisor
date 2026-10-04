@@ -4,7 +4,7 @@
 //! fixed hardware: the power management registers, the sleep states, the
 //! embedded controller, the boot architecture flags. One field of it is parsed
 //! here — where the power management timer is — because one field of it is what
-//! pulzar uses. The table's own address stays in the directory, so whatever
+//! citrine uses. The table's own address stays in the directory, so whatever
 //! needs the rest later can read the rest later.
 //!
 //! # Why the timer
@@ -50,7 +50,7 @@ const TIMER_BYTES: u8 = 4;
 /// Bits the timer's register block is wide, whatever part of it counts.
 const REGISTER_BITS: u8 = 32;
 
-/// What pulzar keeps from the fixed hardware description.
+/// What citrine keeps from the fixed hardware description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fadt {
     pm_timer: Option<PmTimer>,

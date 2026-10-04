@@ -12,7 +12,7 @@
 //! On a machine booted through UEFI the timer is usually stopped: firmware has
 //! no further use for it, and whatever runs next is expected to enable it
 //! itself. Starting it is therefore often necessary, and it is always a change
-//! to hardware that is not pulzar's. So the enable bit is read before it is
+//! to hardware that is not citrine's. So the enable bit is read before it is
 //! written, and a timer that was found stopped is stopped again once the clock
 //! no longer needs it — unless the clock ends up keeping time from the very
 //! counter it started, which cannot be stopped without stopping time.
@@ -209,7 +209,7 @@ fn probe(registers: VirtAddr) -> Result<(Counter, Option<Restore>), ClockError> 
 /// be stopped.
 ///
 /// Nothing here wants the event timer's interrupts — the clock reads its
-/// counter and that is all — so this is not a configuration pulzar imposes but
+/// counter and that is all — so this is not a configuration citrine imposes but
 /// one it needs for the few milliseconds it holds the block. It also settles
 /// the legacy replacement route, which can only carry interrupts a comparator
 /// is raising in the first place.

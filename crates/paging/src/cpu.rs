@@ -106,7 +106,7 @@ pub fn refuse_five_level_paging() -> Result<(), PagingError> {
 /// every context it was not currently in, which is precisely the failure a
 /// shootdown exists to prevent.
 ///
-/// Nothing in pulzar sets `PCIDE`, so this asserts a property rather than
+/// Nothing in citrine sets `PCIDE`, so this asserts a property rather than
 /// changing one — but it is asserted on every processor's way up, because the
 /// cost of being wrong is silent.
 ///
@@ -163,8 +163,8 @@ pub const PAT_POLICY: u64 = 0x0007_0406_0007_0406;
 /// open.
 ///
 /// On the boot processor these hold while the address space is being built,
-/// before anything of pulzar's is mapped. On an application processor they hold
-/// at its entry point, before it maps or touches anything of its own.
+/// before anything of citrine's is mapped. On an application processor they
+/// hold at its entry point, before it maps or touches anything of its own.
 pub unsafe fn establish_pat() -> Result<bool, PagingError> {
     if !processor::features().contains(Features::PAGE_ATTRIBUTE_TABLE) {
         return Err(PagingError::PatUnsupported);

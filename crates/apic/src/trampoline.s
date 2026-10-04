@@ -29,11 +29,11 @@
 // nothing to say why; the stage number is the whole of what the processor that
 // started it can find out afterwards.
 
-.section .text.pulzar_trampoline, "ax"
+.section .text.citrine_trampoline, "ax"
 .balign 16
 
-.globl pulzar_trampoline_start
-pulzar_trampoline_start:
+.globl citrine_trampoline_start
+citrine_trampoline_start:
 
 .code16
     cli
@@ -65,8 +65,8 @@ pulzar_trampoline_start:
     jmp fword ptr ds:[{PROTECTED_ENTRY}]
 
 .code32
-.globl pulzar_trampoline_protected
-pulzar_trampoline_protected:
+.globl citrine_trampoline_protected
+citrine_trampoline_protected:
     mov ax, {DATA32_SELECTOR}
     mov ds, ax
     mov es, ax
@@ -141,8 +141,8 @@ pulzar_trampoline_protected:
     jmp fword ptr cs:[{LONG_ENTRY}]
 
 .code64
-.globl pulzar_trampoline_long
-pulzar_trampoline_long:
+.globl citrine_trampoline_long
+citrine_trampoline_long:
     // A write to a 32-bit register outside 64-bit mode says nothing about the
     // upper half, so the page base is re-established as a 64-bit value before it
     // is used as one.
@@ -182,16 +182,16 @@ pulzar_trampoline_long:
     mov qword ptr [rsp], 0
     jmp rax
 
-.globl pulzar_trampoline_end
-pulzar_trampoline_end:
+.globl citrine_trampoline_end
+citrine_trampoline_end:
 
 // How large the blob is and where each of its stages begins, as data rather than
 // as a difference between two addresses Rust would have to subtract for itself.
 // Outside the copied range, because it describes it.
-.section .rodata.pulzar_trampoline, "a"
+.section .rodata.citrine_trampoline, "a"
 .balign 8
-.globl pulzar_trampoline_extent
-pulzar_trampoline_extent:
-    .quad pulzar_trampoline_end - pulzar_trampoline_start
-    .quad pulzar_trampoline_protected - pulzar_trampoline_start
-    .quad pulzar_trampoline_long - pulzar_trampoline_start
+.globl citrine_trampoline_extent
+citrine_trampoline_extent:
+    .quad citrine_trampoline_end - citrine_trampoline_start
+    .quad citrine_trampoline_protected - citrine_trampoline_start
+    .quad citrine_trampoline_long - citrine_trampoline_start

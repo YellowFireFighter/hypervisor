@@ -3,14 +3,14 @@
 //!
 //! Twelve bytes — an address space, a width, an offset inside the register, an
 //! access size, and a 64-bit address — used wherever a table has to say where a
-//! register is rather than what is in it. The timers pulzar reads arrive this
+//! register is rather than what is in it. The timers citrine reads arrive this
 //! way: the HPET's register block, and the power management timer.
 //!
 //! Two address spaces are modelled, because two are all a timer can be in on a
-//! machine pulzar runs on: physical memory and the processor's I/O ports. Every
-//! other space ACPI defines is kept as the raw identifier firmware wrote, so
-//! that a consumer refuses it by name rather than mistaking it for one of the
-//! two it can reach.
+//! machine citrine runs on: physical memory and the processor's I/O ports.
+//! Every other space ACPI defines is kept as the raw identifier firmware wrote,
+//! so that a consumer refuses it by name rather than mistaking it for one of
+//! the two it can reach.
 //!
 //! The access size is not modelled. The registers this crate describes state
 //! their width in the same table, and the field was reserved before ACPI 2.0,

@@ -32,7 +32,7 @@ const TRUE_CONTROLS_BIT: u64 = 1 << 55;
 /// with.
 ///
 /// Only two of the sixteen codes ever appear here: a processor reports
-/// write-back on every part pulzar would run on, and uncacheable on some early
+/// write-back on every part citrine would run on, and uncacheable on some early
 /// or constrained parts. The rest are reserved, so [`MemoryType::from_code`]
 /// answers `None` for them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

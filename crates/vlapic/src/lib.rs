@@ -1,6 +1,6 @@
 //! The local interrupt controller a guest sees, in place of the machine's own.
 //!
-//! Pulzar passes the platform through. It does not pass the interrupt
+//! Citrine passes the platform through. It does not pass the interrupt
 //! controller through, and the difference is the point: a guest that reached
 //! the real controller would be a guest that could mask the host's interrupts,
 //! acknowledge the host's, send the host's processors a reset, and rename the

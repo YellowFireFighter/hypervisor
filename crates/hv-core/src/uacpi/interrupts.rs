@@ -5,11 +5,11 @@
 //! a level-triggered, shareable line to it, the host installs a handler, and
 //! general purpose events arrive there and are dispatched into bytecode. uACPI
 //! asks its host to install that handler while the namespace is being brought
-//! up, and pulzar answers that it will not.
+//! up, and citrine answers that it will not.
 //!
 //! # Why
 //!
-//! Because the interrupt is not this hypervisor's to take. Pulzar passes the
+//! Because the interrupt is not this hypervisor's to take. Citrine passes the
 //! machine through: what runs after bring-up is the firmware boot manager, and
 //! then an operating system, and that operating system enters ACPI mode,
 //! enables the general purpose events it cares about, and services the control
@@ -19,7 +19,7 @@
 //! one. There is no arrangement in which both service it and both are correct.
 //!
 //! So the platform's hardware state is left exactly as firmware set it, which
-//! is also why [`super::initialize`] declines to enter ACPI mode. What pulzar
+//! is also why [`super::initialize`] declines to enter ACPI mode. What citrine
 //! wants out of uACPI is the description of a machine — its tables, its
 //! namespace, the values its bytecode computes — and none of that needs an
 //! interrupt.
@@ -72,7 +72,7 @@ pub fn describe(who: &str) {
 /// Declines to route a system interrupt to uACPI.
 ///
 /// See this module: the interrupt belongs to whatever boots after this
-/// hypervisor, and nothing pulzar asks of uACPI needs one.
+/// hypervisor, and nothing citrine asks of uACPI needs one.
 ///
 /// # Safety
 ///

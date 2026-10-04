@@ -1,10 +1,10 @@
 //! A running hardware counter, whatever the hardware underneath it is.
 //!
-//! Three kinds of counter can serve pulzar — the processor's timestamp counter,
-//! a memory-mapped register in an event timer, and a port belonging to the
-//! chipset — and everything above this module wants the same three things from
-//! each: read it, know how fast it counts, and know where it wraps. So there is
-//! one type here and the differences between the three are a register
+//! Three kinds of counter can serve citrine — the processor's timestamp
+//! counter, a memory-mapped register in an event timer, and a port belonging to
+//! the chipset — and everything above this module wants the same three things
+//! from each: read it, know how fast it counts, and know where it wraps. So
+//! there is one type here and the differences between the three are a register
 //! description and a width.
 //!
 //! Reads are volatile and never elided. A counter's value is the one thing in a
@@ -93,7 +93,7 @@ impl Counter {
             Register::Port(port) => {
                 let mut port = Port::<u32>::new(port);
                 // SAFETY: `new`'s caller guarantees that reading this port has
-                // no effect on the machine, and pulzar runs at ring 0, where
+                // no effect on the machine, and citrine runs at ring 0, where
                 // port access is permitted.
                 u64::from(unsafe { port.read() })
             }

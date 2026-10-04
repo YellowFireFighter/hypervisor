@@ -1,16 +1,16 @@
-# pulzar
+# citrine
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
 
 A type-1 hypervisor for x86-64, written in `no_std` Rust on AMD SVM.
 
-pulzar boots as a UEFI application and takes the machine over before any
+citrine boots as a UEFI application and takes the machine over before any
 operating system exists. The firmware it started under becomes its first
 guest; the OS boot manager runs on inside that guest; and Windows or Linux
 boots unmodified and unaware, with every processor it brings up virtualized.
 Nothing is paravirtualized and no guest tooling is required — a provisioned
-disk boots the same way behind pulzar as in front of it.
+disk boots the same way behind citrine as in front of it.
 
 The machine is passed through, not emulated: a guest's devices are its real
 ones. The two exceptions are deliberate. The interrupt controller is emulated,
@@ -30,7 +30,7 @@ and nothing placeholder. Below is exactly what is present, and how to run it.
 
 1. Firmware starts `hv-loader` (`EFI/BOOT/BOOTX64.EFI`). It captures the
    state firmware is running with, reserves a 64 MiB chunk of physical memory
-   for the hypervisor, loads the hypervisor image from `\pulzar.efi` beside
+   for the hypervisor, loads the hypervisor image from `\citrine.efi` beside
    it, and preloads the guest boot manager — Windows' own,
    `\EFI\Microsoft\Boot\bootmgfw.efi`, searched on every filesystem volume
    (a missing or ambiguous path refuses the boot rather than guessing).
@@ -178,9 +178,9 @@ partition as a plain directory under `dist/esp/`, served to QEMU through its
 virtual-FAT driver — no filesystem image is ever built or committed.
 
 The staged partition holds the loader at `EFI/BOOT/BOOTX64.EFI` and the
-hypervisor image at `pulzar.efi`. The loader preloads the Windows boot
+hypervisor image at `citrine.efi`. The loader preloads the Windows boot
 manager from the guest's own system partition and the portal starts it inside
-the first guest, so a Windows disk boots behind pulzar as it is.
+the first guest, so a Windows disk boots behind citrine as it is.
 
 For the Linux demonstration disks the loader is built with its `limine`
 feature instead (`cargo xtask build --limine`, and automatically by
@@ -197,7 +197,7 @@ cargo xtask disk windows --iso <windows-11.iso>  # blank disk, interactive Windo
 ```
 
 Windows ISOs cannot be redistributed, so you supply your own. Disks, OVMF
-firmware and TPM state live in a per-user cache (`~/.cache/pulzar`), never in
+firmware and TPM state live in a per-user cache (`~/.cache/citrine`), never in
 the repository, and survive re-clones.
 
 ### Run it
@@ -214,7 +214,7 @@ cargo xtask run --os linux
 | `--silent` | Compile every log record out of both images, for a real machine |
 | `--no-console` | Give the guest no debug console and no serial port at all |
 | `--serial-log FILE` | Capture guest log output to a file (repeatable: debug console first, then COM ports) |
-| `--no-hypervisor` | Boot the guest disk directly, pulzar taken out — the same machine and disk, to tell a fault of the hypervisor's from one the guest has anyway |
+| `--no-hypervisor` | Boot the guest disk directly, citrine taken out — the same machine and disk, to tell a fault of the hypervisor's from one the guest has anyway |
 | `--screen-log` | Draw the log on the screen instead of the boot screen |
 
 `cargo xtask build` takes `--release`, `--silent` and `--screen-log` the same

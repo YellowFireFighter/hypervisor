@@ -146,10 +146,10 @@ impl AddressSpace {
         cpu::refuse_process_context_identifiers()?;
         cpu::enable_no_execute()?;
         // SAFETY: the caller guarantees this processor is in bring-up: firmware's
-        // address space is still the active one, nothing of pulzar's is mapped,
+        // address space is still the active one, nothing of citrine's is mapped,
         // and no other processor is running.
         if unsafe { cpu::establish_pat() }? {
-            warn!("paging: firmware had reprogrammed IA32_PAT; established pulzar's policy");
+            warn!("paging: firmware had reprogrammed IA32_PAT; established citrine's policy");
         }
 
         let ram = RamMap::new(ram)?;
@@ -219,7 +219,7 @@ impl AddressSpace {
         // policy is the same one the loader established, so on a machine where
         // both ran this writes nothing.
         if unsafe { cpu::establish_pat() }? {
-            warn!("paging: IA32_PAT did not hold pulzar's policy on adoption; established it");
+            warn!("paging: IA32_PAT did not hold citrine's policy on adoption; established it");
         }
         existing.check()?;
 
@@ -1594,9 +1594,9 @@ impl Protection {
 /// [`cpu::PAT_POLICY`], which every processor establishes before it uses a
 /// mapping. Write-combining and write-protected are absent deliberately: they
 /// need the `PAT` bit, whose position differs between 4 KiB pages and large
-/// pages, and nothing pulzar maps wants them. Note that an MTRR can still force
-/// a stricter type over a range — MMIO in particular — which is firmware's
-/// decision and not overridden here.
+/// pages, and nothing citrine maps wants them. Note that an MTRR can still
+/// force a stricter type over a range — MMIO in particular — which is
+/// firmware's decision and not overridden here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheType {
     /// Cached, writes buffered. The type for ordinary RAM.

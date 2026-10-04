@@ -189,11 +189,11 @@ core::arch::global_asm!(
 
 unsafe extern "C" {
     /// First byte of the blob, and where a started processor begins.
-    #[link_name = "pulzar_trampoline_start"]
+    #[link_name = "citrine_trampoline_start"]
     static BLOB_START: u8;
     /// How large the blob is and where its stages begin, emitted by the
     /// assembler beside it rather than derived from label addresses here.
-    #[link_name = "pulzar_trampoline_extent"]
+    #[link_name = "citrine_trampoline_extent"]
     static EXTENT: Extent;
 }
 

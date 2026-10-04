@@ -107,7 +107,7 @@ pub enum Console {
     None,
 }
 
-/// Whether pulzar stands in front of the guest.
+/// Whether citrine stands in front of the guest.
 ///
 /// A choice rather than a flag, because the two are not settings of one thing.
 /// One boots the media this workspace builds, with the guest disk behind it;
@@ -120,7 +120,7 @@ pub enum Layering {
     /// Boot the staged hypervisor media, with the guest disk behind it.
     Hypervisor,
     /// Boot the guest disk directly. Nothing is built, because nothing of
-    /// pulzar's is used.
+    /// citrine's is used.
     Bare,
 }
 

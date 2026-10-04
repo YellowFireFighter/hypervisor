@@ -26,11 +26,11 @@ use vlapic::VlapicError;
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CoreError {
     /// The VMX self-test ran to completion and the build halts deliberately,
-    /// because the rest of pulzar is AMD SVM and cannot run the guest on the
+    /// because the rest of citrine is AMD SVM and cannot run the guest on the
     /// Intel machine the self-test is for. Not an error in the ordinary sense;
     /// it takes the halt-and-report path every other variant does.
     #[cfg(feature = "vmx-selftest")]
-    #[error("vmx self-test complete; halting (pulzar's guest path is AMD SVM)")]
+    #[error("vmx self-test complete; halting (citrine's guest path is AMD SVM)")]
     VmxSelfTestComplete,
     /// This is an Intel processor. The VMX backend — proven mechanism by
     /// mechanism in the self-test — is not yet wired into bring-up, so there is

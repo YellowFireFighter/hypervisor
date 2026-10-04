@@ -21,7 +21,7 @@
 //! Only 64-bit fields have a high half, and most of the time a caller reads one
 //! whole with a single 64-bit `VMREAD` of the full encoding. The high
 //! encoding — the same field with bit 0 set — exists for a 32-bit host reaching
-//! a 64-bit field in two halves, which pulzar does not do; it is modelled so
+//! a 64-bit field in two halves, which citrine does not do; it is modelled so
 //! the encoding scheme is complete and so [`FieldEncoding::high`] can be stated
 //! and tested, not because the fields below are listed twice.
 
@@ -44,8 +44,8 @@ pub enum Width {
     /// rights.
     DoubleWord = 2,
     /// The width of a general register in the processor's current mode, which
-    /// for the long-mode guests pulzar runs is eight bytes: a control register,
-    /// a segment base, `RIP`, `RSP`, `RFLAGS`.
+    /// for the long-mode guests citrine runs is eight bytes: a control
+    /// register, a segment base, `RIP`, `RSP`, `RFLAGS`.
     Natural = 3,
 }
 
@@ -233,7 +233,7 @@ impl Debug for FieldEncoding {
 /// be a name the processor does not answer to. A caller writes
 /// [`Field::GUEST_RIP`] where it means that field and never a bare number.
 ///
-/// This holds the fields pulzar's VMX backend programs, across every kind and
+/// This holds the fields citrine's VMX backend programs, across every kind and
 /// width. It is not the whole of the architecture's table — the SGX,
 /// shadow-VMCS and advanced-APIC fields a different hypervisor might touch are
 /// not here — and adding one is adding a single constant, which the tests below

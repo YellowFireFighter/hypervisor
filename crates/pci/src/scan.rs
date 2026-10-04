@@ -159,7 +159,7 @@ impl Function {
         self.phys
     }
 
-    /// Where its configuration space is mapped, for as long as pulzar runs.
+    /// Where its configuration space is mapped, for as long as citrine runs.
     ///
     /// `None` if the mapping window could not hold it, in which case reaching
     /// the function again means mapping it again.

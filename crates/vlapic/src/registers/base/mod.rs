@@ -57,7 +57,7 @@
 //! # The register page does not move, and that is part of the machine
 //!
 //! The address field is architecturally writable on real hardware and is not
-//! writable here, so this is a way in which the machine Pulzar presents is
+//! writable here, so this is a way in which the machine Citrine presents is
 //! narrower than the one its `CPUID` describes. It is stated rather than
 //! hidden: the guest's controller lives at [`ApicBase::DEFAULT_PAGE`] for the
 //! whole life of the guest, and a write naming any other address leaves it
@@ -80,7 +80,7 @@
 //! told the truth, which is that its controller did not move.
 //!
 //! The same fact decides what happens on a machine whose *firmware* had moved
-//! the page before pulzar ran, and there the answer cannot be to ignore a
+//! the page before citrine ran, and there the answer cannot be to ignore a
 //! write: there is no guest instruction to ignore. Everything outside the one
 //! trapped page is an identity map of machine physical memory, so a guest on
 //! such a machine would reach the *real* local APIC at firmware's address,

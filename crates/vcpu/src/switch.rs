@@ -27,7 +27,7 @@
 //! it is — and its task register, so that must happen on every exit.
 //!
 //! The matching `VMSAVE` does not. None of the state those instructions carry
-//! changes on a pulzar processor once it has installed its descriptor tables
+//! changes on a citrine processor once it has installed its descriptor tables
 //! and attached: there is no `swapgs`, nothing reloads the task register, and
 //! nothing writes a fast-system-call register. So the snapshot is taken once,
 //! by [`Host::install`](crate::Host::install), and every exit reloads it. That

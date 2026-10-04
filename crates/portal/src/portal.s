@@ -3,17 +3,17 @@
 // as firmware itself, so it must not reference any host virtual address —
 // only the guest-physical parameter page reached via `rip`-relative
 // addressing, and the pointers that page carries.
-.section .text.pulzar_portal, "ax"
+.section .text.citrine_portal, "ax"
 .balign 4096
 
 // Entry point. The loader resumes the guest here instead of where firmware
 // was captured, with rip pointing at the first byte of this page.
-.globl pulzar_portal_start
-pulzar_portal_start:
+.globl citrine_portal_start
+citrine_portal_start:
     // r11 -> the parameter page, one page after this one. Every later use of
     // the system table, image handles, state, and original service is relative
     // to this pointer.
-    lea r11, [rip + pulzar_portal_data]
+    lea r11, [rip + citrine_portal_data]
 
     // rbx -> firmware's boot-services table, read from the live system table
     // rather than baked into the blob, since the portal is position-
@@ -25,7 +25,7 @@ pulzar_portal_start:
     // the host is told the instant firmware's services stop existing. The
     // guest's own copy of the pointer is what gets overwritten here — the
     // boot manager will call this wrapper without knowing it changed.
-    lea rax, [rip + pulzar_portal_exit_boot_services]
+    lea rax, [rip + citrine_portal_exit_boot_services]
     mov [rbx + {BOOT_EXIT_BOOT_SERVICES}], rax
 
     // UEFI tables carry a CRC32 of their own bytes; having just modified one
@@ -56,7 +56,7 @@ pulzar_portal_start:
     // guest is parked rather than risk starting the boot manager against a
     // table firmware will refuse, or worse, silently misread.
     test rax, rax
-    jnz pulzar_portal_halt
+    jnz citrine_portal_halt
     mov dword ptr [rbx + {HEADER_CRC}], r9d
 
     // StartImage(ImageHandle, &ExitDataSize, &ExitData). The guest image
@@ -64,7 +64,7 @@ pulzar_portal_start:
     // left it in, since the portal does not rely on any state from before
     // the loader captured it. ExitDataSize/ExitData are zeroed and discarded:
     // the host only cares whether control returns here at all, not why.
-    lea r11, [rip + pulzar_portal_data]
+    lea r11, [rip + citrine_portal_data]
     sub rsp, 48
     mov rcx, [r11 + {GUEST_IMAGE_HANDLE}]
     mov qword ptr [rsp + 32], 0
@@ -87,8 +87,8 @@ pulzar_portal_start:
 // Reached only when the guest cannot be handed back safely. There is
 // nothing left to attempt, so the processor is stopped for good; `hlt` is
 // re-issued in a loop in case of a spurious wake.
-.globl pulzar_portal_halt
-pulzar_portal_halt:
+.globl citrine_portal_halt
+citrine_portal_halt:
     cli
 1:
     hlt
@@ -98,8 +98,8 @@ pulzar_portal_halt:
 // boot manager see an ordinary function at this address and call it with the
 // ordinary ExitBootServices arguments already in rcx/rdx. Those arguments are
 // preserved while the first call unloads the loader and notifies the host.
-.globl pulzar_portal_exit_boot_services
-pulzar_portal_exit_boot_services:
+.globl citrine_portal_exit_boot_services
+citrine_portal_exit_boot_services:
     // r11 is caller-saved by convention but is still in active use by the
     // caller's own code around this call site, so it is preserved rather
     // than assumed free, then reloaded with the parameter-page pointer this
@@ -107,7 +107,7 @@ pulzar_portal_exit_boot_services:
     push r11
     push rcx
     push rdx
-    lea r11, [rip + pulzar_portal_data]
+    lea r11, [rip + citrine_portal_data]
 
     // The first call unloads the loader while boot services are still live.
     // UnloadImage changes the memory map, so the real EBS call below is
@@ -134,7 +134,7 @@ pulzar_portal_exit_boot_services:
     // UnloadImage follows the firmware ABI and may destroy every volatile
     // register, including r11. Rebuild the portal pointer before reading the
     // saved ExitBootServices target below.
-    lea r11, [rip + pulzar_portal_data]
+    lea r11, [rip + citrine_portal_data]
     pop rdx
     pop rcx
 
@@ -163,12 +163,12 @@ pulzar_portal_exit_boot_services:
 
 // The parameter page: the only guest-physical addresses this blob knows,
 // filled in by `Portal::fill` after the blob itself is copied. Nothing here
-// is read before `pulzar_portal_start` runs, so the initial zeros below are
+// is read before `citrine_portal_start` runs, so the initial zeros below are
 // never observed — they exist only so the layout matches `Parameters`
 // exactly, with no gap the blob could read uninitialized.
 .balign 4096
-.globl pulzar_portal_data
-pulzar_portal_data:
+.globl citrine_portal_data
+citrine_portal_data:
     .quad 0   // system_table
     .quad 0   // guest_image_handle
     .quad 0   // loader_image_handle
@@ -177,6 +177,6 @@ pulzar_portal_data:
 
 // Marks the end of the reservation `Portal::place` copies and bounds-checks
 // against; nothing is emitted here, only the symbol `blob()` measures against
-// `pulzar_portal_start` to know how many bytes to copy.
-.globl pulzar_portal_end
-pulzar_portal_end:
+// `citrine_portal_start` to know how many bytes to copy.
+.globl citrine_portal_end
+citrine_portal_end:

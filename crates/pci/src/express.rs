@@ -419,7 +419,7 @@ struct LinkCapabilities {
     #[bits(6)]
     pub width: u8,
     /// The rest describes power management, latency and reporting, none of
-    /// which pulzar reads.
+    /// which citrine reads.
     #[bits(22)]
     __: u32,
 }
@@ -459,7 +459,8 @@ struct DeviceCapabilities2 {
     __: u8,
     /// Whether the port can forward the alternative routing interpretation.
     pub ari_forwarding: bool,
-    /// Everything else the second generation added, none of which pulzar reads.
+    /// Everything else the second generation added, none of which citrine
+    /// reads.
     #[bits(26)]
     __: u32,
 }

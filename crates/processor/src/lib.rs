@@ -6,7 +6,7 @@
 //! machine implements. This crate is the one place that asks. Everything else
 //! reads [`features`], gets a value it can keep, and never sees a leaf number.
 //!
-//! Only the features pulzar acts on are modelled. A feature nothing adapts to
+//! Only the features citrine acts on are modelled. A feature nothing adapts to
 //! is a feature nothing needs to know about, and adding it here on the chance
 //! that something might would put a bit position in the codebase that no code
 //! reads.
@@ -50,7 +50,7 @@ use spin::Once;
 pub use crate::svm::{MemoryEncryption, Svm, SvmFeatures, svm};
 
 bitflags! {
-    /// The processor features pulzar adapts to or refuses to run without.
+    /// The processor features citrine adapts to or refuses to run without.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Features: u32 {
         /// 1 GiB pages are available, so the direct map costs one
@@ -59,7 +59,7 @@ bitflags! {
         const GIB_PAGES = 1 << 0;
         /// The no-execute bit in a page table entry is honoured rather than
         /// reserved. Without it nothing can be mapped non-executable, which
-        /// pulzar refuses to run without.
+        /// citrine refuses to run without.
         const NO_EXECUTE = 1 << 1;
         /// The processor has a hardware entropy source.
         const RDRAND = 1 << 2;
@@ -69,7 +69,7 @@ bitflags! {
         const INVARIANT_TSC = 1 << 3;
         /// The processor has a local interrupt controller on board. Without it
         /// there is no way to address another processor, and no way to take a
-        /// timer interrupt that is the hypervisor's own, so pulzar refuses to
+        /// timer interrupt that is the hypervisor's own, so citrine refuses to
         /// run without it.
         const APIC = 1 << 4;
         /// The local interrupt controller can be put into x2APIC mode, where
@@ -106,7 +106,7 @@ bitflags! {
 
 impl Features {
     /// Logs what the processor reported, present and absent alike: which of
-    /// these a machine lacks is what explains the paths pulzar takes on it.
+    /// these a machine lacks is what explains the paths citrine takes on it.
     pub fn describe(&self, who: &str) {
         info!("{who}: processor has {self:?}");
         let missing = Self::all().difference(*self);
@@ -281,7 +281,7 @@ pub enum Vendor {
     Amd,
     /// An Intel processor, virtualized through VMX.
     Intel,
-    /// A processor of neither vendor, which pulzar does not virtualize.
+    /// A processor of neither vendor, which citrine does not virtualize.
     Other,
 }
 
@@ -354,7 +354,7 @@ const LEGACY_PHYSICAL_ADDRESS_BITS: u8 = 36;
 pub fn timestamp() -> u64 {
     // SAFETY: `rdtsc` is implemented by every processor that can run 64-bit
     // code and reads a counter without side effects. `CR4.TSD` can make it
-    // fault outside ring 0, and pulzar never leaves ring 0.
+    // fault outside ring 0, and citrine never leaves ring 0.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 

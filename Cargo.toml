@@ -60,7 +60,7 @@ uefi = { version = "0.39.0", features = ["alloc", "panic_handler", "global_alloc
 # there is no UEFI left to wrap.
 uefi-raw = "0.15.1"
 
-# Firmware-side pulzar crates. `handoff` is the ABI the loader and the
+# Firmware-side citrine crates. `handoff` is the ABI the loader and the
 # hypervisor image agree on; `paging` is the address-space subsystem both of
 # them drive; `acpi` turns the firmware tables into data the hypervisor owns;
 # `descriptors` owns the processor's own tables and the interrupt entry path;

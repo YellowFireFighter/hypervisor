@@ -1,6 +1,6 @@
 [package]
 name = "descriptors"
-description = "Host descriptor tables and interrupt dispatch for the pulzar hypervisor"
+description = "Host descriptor tables and interrupt dispatch for the citrine hypervisor"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -55,7 +55,7 @@
 //!
 //! The encrypted-virtualization extension — the encrypted state area, the
 //! guest-host communication block, the reverse map table and their
-//! model-specific registers — is not modelled. Pulzar does not implement it.
+//! model-specific registers — is not modelled. Citrine does not implement it.
 //! Where its fields fall inside a structure this crate does define, they are
 //! present as plain values so that the layout stays exact, and are documented
 //! as belonging to an extension nothing here drives.

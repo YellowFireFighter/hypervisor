@@ -1,7 +1,7 @@
 //! Filesystem locations used by the task runner.
 //!
 //! Two roots: the workspace itself (source, build output, and the staged ESP
-//! under `dist/`) and a per-user cache (`~/.cache/pulzar` on Linux) for
+//! under `dist/`) and a per-user cache (`~/.cache/citrine` on Linux) for
 //! artifacts that are expensive to recreate and independent of any one
 //! checkout — guest OS disks, OVMF firmware, and TPM state. Keeping those in
 //! the user cache means they survive re-clones, are shared between git
@@ -33,7 +33,7 @@ pub fn esp_dir() -> PathBuf {
 pub fn cache_dir(subdir: &str) -> Result<PathBuf> {
     let dir = dirs::cache_dir()
         .context("no per-user cache directory is defined on this platform")?
-        .join("pulzar")
+        .join("citrine")
         .join(subdir);
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create cache directory {}", dir.display()))?;

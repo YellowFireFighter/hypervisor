@@ -5,7 +5,7 @@ cargo-features = ["per-package-target"]
 
 [package]
 name = "hv-loader"
-description = "First-stage UEFI loader for the pulzar hypervisor"
+description = "First-stage UEFI loader for the citrine hypervisor"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

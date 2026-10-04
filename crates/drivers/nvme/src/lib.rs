@@ -14,7 +14,7 @@
 //! # It starts the moment the devices are this hypervisor's
 //!
 //! A controller cannot be taken over while anything else may be driving it,
-//! and pulzar keeps the firmware environment it booted from running until
+//! and citrine keeps the firmware environment it booted from running until
 //! the guest's own `ExitBootServices`. That interception is the earliest
 //! moment a base address register may be asked how far it decodes — which is
 //! what [`adopt`] needs it for — and [`adopt`] is meant to be called from

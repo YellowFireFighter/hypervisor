@@ -561,8 +561,8 @@ fn flags(state: State) -> EmulatedFlags {
 
 /// The banks and the entry table the interface carries are the ones this
 /// hypervisor's own controllers have. They are separate statements — the
-/// interface has no dependency on the rest of pulzar and must not grow one — so
-/// a disagreement is caught here rather than by a reader finding a bank half
+/// interface has no dependency on the rest of citrine and must not grow one —
+/// so a disagreement is caught here rather than by a reader finding a bank half
 /// reported.
 const _: () = assert!(
     BANK_SLOTS == apic::VECTOR_WORDS
