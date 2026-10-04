@@ -28,14 +28,16 @@
 //! a minimal busy 64-bit one, and every loaded code or data segment is marked
 //! accessed.
 //!
-//! Two more keep the stub, which is citrine's code and not firmware's, from
-//! being diverted into firmware's handlers. The stub is entered with interrupts
-//! masked, because an interrupt firmware's timer left pending would otherwise
-//! be delivered through firmware's descriptor table before the stub's first
-//! instruction. And every exception exits to the host instead of being
-//! delivered, so a fault taken running the stub — a page firmware maps
-//! non-executable, say — is reported with its vector, error code and address
-//! rather than vanishing into firmware's exception handler.
+//! Earlier runs proved VM entry and that the stub executes. This run lets
+//! firmware's own code run as the guest: the stub is entered with firmware's
+//! interrupts enabled, so the timer interrupt firmware's hardware keeps raising
+//! is delivered through firmware's own descriptor table and handled by
+//! firmware's handler, which returns to the stub's `VMCALL`. For that handler
+//! to run without stopping the guest, the guest must not exit on its `CR3`
+//! accesses — firmware saves `CR3` on every interrupt entry — so those exits
+//! are dropped where the processor's "true" capability registers permit it.
+//! Exits that remain unexplained still report the guest's position, and an
+//! intercepted exception or non-maskable interrupt its vector and cause.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -51,7 +53,7 @@ use vmx::{
     check::{self, GuestState, Subject},
     segment::{BUSY_TSS_TYPE, TYPE_ACCESSED},
 };
-use x86_64::{VirtAddr, registers::rflags::RFlags};
+use x86_64::VirtAddr;
 
 /// Bytes in a gibibyte, the unit the EPT identity map is sized in.
 const GIB: u64 = 1 << 30;
@@ -59,10 +61,6 @@ const GIB: u64 = 1 << 30;
 /// The limit of the smallest 64-bit task-state segment, which is what a guest
 /// given a task register of citrine's own is described with.
 const TSS_LIMIT: u32 = 0x67;
-
-/// An exception bitmap with every vector set, so every exception the guest
-/// takes exits instead of being delivered.
-const EVERY_EXCEPTION: u64 = 0xFFFF_FFFF;
 
 /// The four VMCS fields that describe one guest segment: selector, base, limit
 /// and access rights.
@@ -204,7 +202,6 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
     let programmed = unsafe {
         host::program(&cell)
             .and_then(|()| controls::program(&cell, Some(eptp)))
-            .and_then(|()| cell.write(Field::EXCEPTION_BITMAP, EVERY_EXCEPTION))
             .and_then(|()| program_firmware(&cell, &firmware.cpu, entry.as_u64()))
     };
     if let Err(error) = programmed {
@@ -218,6 +215,18 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
         entry.as_u64(),
         firmware.cpu.rflags
     );
+
+    // SAFETY: `cell` is the current VMCS, in VMX operation, and `program` wrote
+    // the primary controls this rewrites.
+    match unsafe { controls::relax_cr3_exiting(&cell) } {
+        Ok(true) => {
+            info!("vmxboot: guest CR3 accesses no longer exit; firmware may use its own paging");
+        }
+        Ok(false) => {
+            info!("vmxboot: this processor forces CR3-exiting on; firmware's CR3 saves will exit");
+        }
+        Err(error) => error!("vmxboot: could not relax CR3-exiting: {error}"),
+    }
 
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
     unsafe { predict(&cell) };
@@ -267,7 +276,7 @@ unsafe fn program_firmware(cell: &Vmcs, save: &SaveArea, entry: u64) -> Result<(
         cell.write(Field::CR4_READ_SHADOW, cr4)?;
         cell.write(Field::GUEST_IA32_EFER, save.efer)?;
         cell.write(Field::GUEST_DR7, save.dr7)?;
-        cell.write(Field::GUEST_RFLAGS, quiet(save.rflags))?;
+        cell.write(Field::GUEST_RFLAGS, save.rflags)?;
         cell.write(Field::GUEST_RIP, entry)?;
         cell.write(Field::GUEST_RSP, save.rsp)?;
         program_segments(cell, save)?;
@@ -283,15 +292,6 @@ unsafe fn program_firmware(cell: &Vmcs, save: &SaveArea, entry: u64) -> Result<(
         cell.write(Field::GUEST_PENDING_DBG_EXCEPTIONS, 0)?;
     }
     Ok(())
-}
-
-/// Firmware's `RFLAGS` with interrupts masked, for entering the stub.
-///
-/// Firmware runs with interrupts enabled, and its timer keeps raising them
-/// while the host runs with them off, so one is pending at entry. Delivered,
-/// it would run firmware's handler in place of the stub's first instruction.
-fn quiet(rflags: u64) -> u64 {
-    rflags & !RFlags::INTERRUPT_FLAG.bits()
 }
 
 /// Writes all eight guest segments from a captured save area.
