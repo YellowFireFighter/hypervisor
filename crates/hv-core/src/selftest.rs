@@ -13,13 +13,19 @@
 //! one with a logging backend the tester can read — a serial port, the debug
 //! console, or the on-screen log (`--screen-log`).
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 
+use ept::{ENTRIES, Memory};
 use log::{error, info, warn};
 use paging::AddressSpace;
-use vmcs::{Entered, Registers, Vmcs, controls, guest, host, instr, run};
-use vmx::{BasicExitReason, ExitReason, Field, PAGE_BYTES};
+use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
+use vmx::{BasicExitReason, EptEntry, EptPointer, ExitReason, Field, PAGE_BYTES};
 use x86_64::VirtAddr;
+
+/// How many GiB of guest-physical memory the EPT guest identity-maps, which
+/// must cover every host-physical address its code, stack and page tables fall
+/// at.
+const EPT_IDENTITY_GIB: usize = 16;
 
 /// A page-aligned, page-sized region, which is what a VMXON region and a VMCS
 /// each are.
@@ -135,6 +141,16 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
         "guest launch, resume across CPUIDs, VMCALL",
         entry_probe(&mut cell),
     );
+    // SAFETY: we reached here only by entering VMX operation, so this is a
+    // VMX-capable processor and the capability registers exist.
+    if unsafe { controls::ept_available() } {
+        check(
+            "guest launch under EPT (second translation)",
+            ept_probe(&mut cell, space),
+        );
+    } else {
+        warn!("vmx: EPT not available on this processor; skipping the EPT guest check");
+    }
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
 
@@ -166,32 +182,32 @@ unsafe extern "C" fn guest_probe() {
 /// never reaches its `VMCALL` cannot spin the host.
 const MAX_ENTRIES: u32 = 8;
 
-/// Programs a flat 64-bit guest, runs it through its exits, and reports how it
-/// went.
+/// Programs the flat 64-bit guest into `cell`, behind `ept` when given.
 ///
-/// A clean `GUEST-ENTRY PASS` means a guest was launched, resumed across its
-/// `CPUID` exits, and reached its `VMCALL` — so the world switch, both entry
-/// instructions, and the RIP advance all work. A failure prints the
-/// VM-instruction-error or the unexpected exit reason, which narrows down the
-/// wrong field.
-fn entry_probe(cell: &mut Vmcs) -> bool {
-    let stack = Page::zeroed();
-    let rip = (guest_probe as *const ()).addr() as u64;
-    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
-
-    // SAFETY: `cell` is the current VMCS on this processor and VMX operation is
-    // live. The programming captures this running host, sets a flat 64-bit
-    // guest in the host's own address space with `rip` in executable image text
-    // and `rsp` in the freshly allocated stack page.
-    if let Err(error) = unsafe {
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation, and the
+/// `rip`/`rsp` must point at host-executable code and host-writable stack.
+unsafe fn program_guest(
+    cell: &Vmcs,
+    ept: Option<EptPointer>,
+    rip: u64,
+    rsp: u64,
+) -> Result<(), VmFail> {
+    // SAFETY: the caller guarantees the current VMCS and valid rip/rsp.
+    unsafe {
         host::program(cell)
-            .and_then(|()| controls::program(cell))
+            .and_then(|()| controls::program(cell, ept))
             .and_then(|()| guest::program(cell, rip, rsp))
-    } {
-        error!("vmx: guest-entry VMCS programming failed: {error}");
-        return false;
     }
+}
 
+/// Drives the guest `cell` describes through its `CPUID` exits until it reaches
+/// a `VMCALL`, returning whether it did.
+///
+/// Each `CPUID` is resumed past with the recorded instruction length, so
+/// reaching the `VMCALL` means launch, resume and the RIP advance all work.
+fn drive_to_vmcall(cell: &mut Vmcs) -> bool {
     let mut registers = Registers::default();
     let mut cpuids = 0_u32;
     for entry in 1..=MAX_ENTRIES {
@@ -232,6 +248,92 @@ fn entry_probe(cell: &mut Vmcs) -> bool {
     }
     warn!("vmx: gave up after {MAX_ENTRIES} entries without a VMCALL");
     false
+}
+
+/// Launches the flat 64-bit guest in the host's own address space and drives it
+/// to its `VMCALL`.
+fn entry_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_probe as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; `rip` is in
+    // executable image text and `rsp` in the freshly allocated stack page.
+    if let Err(error) = unsafe { program_guest(cell, None, rip, rsp) } {
+        error!("vmx: guest-entry VMCS programming failed: {error}");
+        return false;
+    }
+    let outcome = drive_to_vmcall(cell);
+    drop(stack);
+    outcome
+}
+
+/// Launches the same guest behind an identity EPT, so it runs through a second
+/// translation rather than directly in the host's physical layout.
+///
+/// Reaching the `VMCALL` without an EPT violation or misconfiguration means the
+/// EPT was built right, installed, and walked by the processor.
+fn ept_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let mut memory = EptMemory {
+        frames: Vec::new(),
+        space,
+    };
+    let eptp = match ept::identity(&mut memory, EPT_IDENTITY_GIB) {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            error!("vmx: EPT could not be built: {error:?}");
+            return false;
+        }
+    };
+
+    let stack = Page::zeroed();
+    let rip = (guest_probe as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the EPT
+    // identity-maps the host-physical addresses the guest reaches, so `rip` and
+    // `rsp`, which the guest translates through the host's own CR3 to those
+    // addresses, stay reachable.
+    if let Err(error) = unsafe { program_guest(cell, Some(eptp), rip, rsp) } {
+        error!("vmx: EPT-guest VMCS programming failed: {error}");
+        return false;
+    }
+    let outcome = drive_to_vmcall(cell);
+    // The EPT tables and stack are walked by the processor for the whole of the
+    // run above, so they are dropped only now.
+    drop(stack);
+    drop(memory);
+    outcome
+}
+
+/// EPT table frames for the self-test, allocated from the heap and translated
+/// to the physical addresses the processor walks.
+struct EptMemory<'a> {
+    frames: Vec<(alloc::boxed::Box<Page>, u64)>,
+    space: &'a AddressSpace,
+}
+
+impl Memory for EptMemory<'_> {
+    fn allocate(&mut self) -> Option<u64> {
+        let frame = Page::zeroed();
+        let virt = VirtAddr::new(core::ptr::from_ref(&frame.0).addr() as u64);
+        let phys = self.space.translate(virt).ok()?.as_u64();
+        self.frames.push((frame, phys));
+        Some(phys)
+    }
+
+    fn table(&mut self, phys: u64) -> &mut [EptEntry; ENTRIES] {
+        let frame = self
+            .frames
+            .iter_mut()
+            .find(|(_, at)| *at == phys)
+            .expect("the mapper only names frames this Memory allocated");
+        let page: *mut Page = core::ptr::from_mut(&mut *frame.0);
+        // SAFETY: a `Page` is 4-KiB aligned and 4-KiB long, exactly a table of
+        // `ENTRIES` eight-byte entries, so the pointer is suitably aligned; it
+        // is owned here and reached through a unique borrow.
+        unsafe { &mut *page.cast::<[EptEntry; ENTRIES]>() }
+    }
 }
 
 /// The basic exit reason the current VMCS records, or `None` if it cannot be

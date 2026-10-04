@@ -52,6 +52,7 @@ vcpu = { workspace = true }
 # the vmx-selftest feature below.
 vmx = { workspace = true, optional = true }
 vmcs = { workspace = true, optional = true }
+ept = { workspace = true, optional = true }
 vlapic = { workspace = true }
 x86_64 = { workspace = true }
 
@@ -83,7 +84,7 @@ splash = []
 # bring-up and then halts, because the rest of pulzar is AMD SVM and cannot
 # proceed on an Intel machine. For bringing the unverified Intel path up on
 # real hardware; off in every ordinary build.
-vmx-selftest = ["dep:vmx", "dep:vmcs"]
+vmx-selftest = ["dep:vmx", "dep:vmcs", "dep:ept"]
 
 [lints]
 workspace = true
