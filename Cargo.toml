@@ -10,6 +10,7 @@ members = [
     "crates/drivers/ethernet",
     "crates/drivers/nvme",
     "crates/emulate",
+    "crates/ept",
     "crates/exits",
     "crates/handoff",
     "crates/hv-core",
@@ -92,6 +93,8 @@ cpu = { path = "crates/cpu" }
 descriptors = { path = "crates/descriptors" }
 ethernet = { path = "crates/drivers/ethernet" }
 emulate = { path = "crates/emulate" }
+# Intel extended page tables, the counterpart to npt.
+ept = { path = "crates/ept" }
 exits = { path = "crates/exits" }
 handoff = { path = "crates/handoff" }
 # The call a guest makes into this hypervisor, and what comes back. Shared
