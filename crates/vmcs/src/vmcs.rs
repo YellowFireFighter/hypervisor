@@ -17,7 +17,7 @@
 //! `VMWRITE`/`VMREAD` round-trip of a field — has been exercised in VMX
 //! operation on an Intel processor.
 
-use vmx::{Capability, FieldEncoding, VmxBasic};
+use vmx::{Capability, Field, FieldEncoding, VmxBasic};
 use x86_64::PhysAddr;
 
 use crate::{error::VmFail, instr};
@@ -116,6 +116,33 @@ impl Vmcs {
     pub unsafe fn write(&self, field: FieldEncoding, value: u64) -> Result<(), VmFail> {
         // SAFETY: the caller guarantees this VMCS is still current.
         unsafe { instr::vmwrite(field, value) }
+    }
+
+    /// Advances the guest's `RIP` past the instruction it exited on, which is
+    /// what resuming after an instruction the host emulated requires.
+    ///
+    /// The processor records how long that instruction was; this reads it and
+    /// the current `RIP` and writes their sum back, so the next entry resumes
+    /// at the following instruction rather than re-executing the one that
+    /// exited.
+    ///
+    /// # Errors
+    ///
+    /// [`VmFail`] if either field cannot be read or written, or this VMCS is no
+    /// longer current.
+    ///
+    /// # Safety
+    ///
+    /// This VMCS must still be the current one on this processor, and the last
+    /// exit must have been on an instruction whose length the processor
+    /// recorded — which an exit caused by executing an instruction always does.
+    pub unsafe fn advance_past_instruction(&self) -> Result<(), VmFail> {
+        // SAFETY: the caller guarantees this VMCS is still current.
+        unsafe {
+            let rip = self.read(Field::GUEST_RIP)?;
+            let length = self.read(Field::VM_EXIT_INSTRUCTION_LENGTH)?;
+            self.write(Field::GUEST_RIP, rip.wrapping_add(length))
+        }
     }
 
     /// Writes a control word into `field` after reconciling `desired` against

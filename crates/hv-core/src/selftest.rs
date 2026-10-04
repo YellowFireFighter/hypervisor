@@ -15,7 +15,7 @@
 
 use alloc::boxed::Box;
 
-use log::{error, info};
+use log::{error, info, warn};
 use paging::AddressSpace;
 use vmcs::{Entered, Registers, Vmcs, controls, guest, host, instr, run};
 use vmx::{BasicExitReason, ExitReason, Field, PAGE_BYTES};
@@ -90,21 +90,53 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
         }
     };
 
-    // A natural-width guest-state field that stores and reads back any canonical
-    // value; the probe is page-aligned and canonical.
-    let field = Field::GUEST_RIP;
-    let probe: u64 = 0x0000_0000_0040_1000;
-    // SAFETY: `cell` is the current VMCS on this processor.
-    let outcome = unsafe { cell.write(field, probe).and_then(|()| cell.read(field)) };
-    match outcome {
-        Ok(read) if read == probe => {
-            info!("vmx: SELF-TEST PASS: VMWRITE/VMREAD round-tripped {probe:#x}");
+    // A battery of checks: each logs PASS or FAIL and the tally at the end sums
+    // them, so one boot exercises many things rather than one.
+    let mut passed = 0_u32;
+    let mut total = 0_u32;
+    let mut check = |name: &str, ok: bool| {
+        total += 1;
+        if ok {
+            passed += 1;
+            info!("vmx: [PASS] {name}");
+        } else {
+            error!("vmx: [FAIL] {name}");
         }
-        Ok(read) => error!("vmx: SELF-TEST FAIL: round-trip read {read:#x}, expected {probe:#x}"),
-        Err(error) => error!("vmx: SELF-TEST FAIL: VMWRITE/VMREAD: {error}"),
-    }
+    };
 
-    entry_probe(&mut cell);
+    // The enable path's own results, read back from hardware: it must have set
+    // CR4.VMXE, and IA32_VMX_BASIC must describe a VMCS that fits a page.
+    check("CR4.VMXE set by the enable path", cr4_vmxe_set());
+    check(
+        "VMX basic region fits a page",
+        (1..=PAGE_BYTES).contains(&(vmx.basic().region_bytes() as usize)),
+    );
+
+    // Field round-trips across every width, which exercises the encoding of
+    // each: a wrong width or index would read back something other than what
+    // was written.
+    check(
+        "16-bit field round-trip",
+        roundtrip(&cell, Field::GUEST_ES_SELECTOR, 0x1234),
+    );
+    check(
+        "32-bit field round-trip",
+        roundtrip(&cell, Field::GUEST_ES_LIMIT, 0xDEAD_BEEF),
+    );
+    check(
+        "64-bit field round-trip",
+        roundtrip(&cell, Field::TSC_OFFSET, 0x1122_3344_5566_7788),
+    );
+    check(
+        "natural-width field round-trip",
+        roundtrip(&cell, Field::GUEST_RIP, 0x0000_0000_0040_1000),
+    );
+    check(
+        "guest launch, resume across CPUIDs, VMCALL",
+        entry_probe(&mut cell),
+    );
+
+    info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
 
     // SAFETY: `cell` is current, so clearing it leaves no current VMCS, which is
     // the precondition for leaving VMX operation.
@@ -116,26 +148,33 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
     true
 }
 
-/// A guest whose first instruction exits unconditionally.
+/// A guest that exits three times: two `CPUID`s, each an unconditional VM exit,
+/// then a `VMCALL` that ends the probe.
 ///
-/// `CPUID` always causes a VM exit from non-root operation, so a guest entered
-/// here runs exactly one instruction before coming back — which is the whole of
-/// what the entry probe needs. It is a naked function so its address is in the
-/// image's executable text, which the guest reaches through the host's own page
-/// tables; the loop after `CPUID` is never run, because the exit does not
-/// resume.
+/// This exercises not just entry but resumption: the host advances past each
+/// `CPUID` and re-enters, so the second `CPUID` and the `VMCALL` are reached
+/// only if `VMRESUME` and the instruction-length advance both work. It is a
+/// naked function so its address is in the image's executable text, which the
+/// guest reaches through the host's own page tables; the `HLT` loop is never
+/// reached.
 #[unsafe(naked)]
 unsafe extern "C" fn guest_probe() {
-    core::arch::naked_asm!("cpuid", "2:", "jmp 2b");
+    core::arch::naked_asm!("cpuid", "cpuid", "vmcall", "2:", "hlt", "jmp 2b");
 }
 
-/// Programs a flat 64-bit guest, enters it, and reports how the entry ended.
+/// The most guest entries the probe makes before giving up, so a guest that
+/// never reaches its `VMCALL` cannot spin the host.
+const MAX_ENTRIES: u32 = 8;
+
+/// Programs a flat 64-bit guest, runs it through its exits, and reports how it
+/// went.
 ///
-/// This is the first exercise of the world switch and the VM-entry checks: a
-/// clean `GUEST-ENTRY PASS` means a guest was launched, ran its `CPUID`, and
-/// exited back into the hypervisor. A failure prints the VM-instruction-error
-/// or the unexpected exit reason, which is what narrows down a wrong field.
-fn entry_probe(cell: &mut Vmcs) {
+/// A clean `GUEST-ENTRY PASS` means a guest was launched, resumed across its
+/// `CPUID` exits, and reached its `VMCALL` — so the world switch, both entry
+/// instructions, and the RIP advance all work. A failure prints the
+/// VM-instruction-error or the unexpected exit reason, which narrows down the
+/// wrong field.
+fn entry_probe(cell: &mut Vmcs) -> bool {
     let stack = Page::zeroed();
     let rip = (guest_probe as *const ()).addr() as u64;
     let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
@@ -143,57 +182,80 @@ fn entry_probe(cell: &mut Vmcs) {
     // SAFETY: `cell` is the current VMCS on this processor and VMX operation is
     // live. The programming captures this running host, sets a flat 64-bit
     // guest in the host's own address space with `rip` in executable image text
-    // and `rsp` in the freshly allocated stack page, and the run loop preserves
-    // and restores the host around the entry.
-    let entered = unsafe {
-        match host::program(cell)
+    // and `rsp` in the freshly allocated stack page.
+    if let Err(error) = unsafe {
+        host::program(cell)
             .and_then(|()| controls::program(cell))
             .and_then(|()| guest::program(cell, rip, rsp))
-        {
-            Ok(()) => Some(run::run(cell, &mut Registers::default())),
-            Err(error) => {
-                error!("vmx: GUEST-ENTRY FAIL: VMCS programming: {error}");
-                None
+    } {
+        error!("vmx: guest-entry VMCS programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let mut cpuids = 0_u32;
+    for entry in 1..=MAX_ENTRIES {
+        // SAFETY: `cell` is current and fully programmed, and the run loop
+        // preserves and restores the host around each entry.
+        match unsafe { run::run(cell, &mut registers) } {
+            Entered::Failed(fail) => {
+                // SAFETY: `cell` is still current.
+                let number = unsafe { cell.read(Field::VM_INSTRUCTION_ERROR) }.unwrap_or(0);
+                error!("vmx: entry {entry} rejected ({fail}); VM-instruction-error {number}");
+                return false;
+            }
+            Entered::Exited => {
+                let Some(reason) = exit_reason(cell) else {
+                    error!("vmx: guest exited but EXIT_REASON could not be read");
+                    return false;
+                };
+                if reason == BasicExitReason::CPUID {
+                    cpuids += 1;
+                    // SAFETY: `cell` is current and the exit was on CPUID, whose
+                    // length the processor recorded.
+                    if let Err(error) = unsafe { cell.advance_past_instruction() } {
+                        error!("vmx: could not advance past CPUID: {error}");
+                        return false;
+                    }
+                } else if reason == BasicExitReason::VMCALL {
+                    info!("vmx: guest ran {cpuids} CPUIDs then VMCALL over {entry} entries");
+                    return true;
+                } else {
+                    error!(
+                        "vmx: guest exited with reason {} (expected CPUID = 10 or VMCALL = 18)",
+                        reason.number()
+                    );
+                    return false;
+                }
             }
         }
-    };
-
-    match entered {
-        Some(Entered::Exited) => report_exit(cell),
-        Some(Entered::Failed(fail)) => {
-            // SAFETY: `cell` is still current.
-            let number = unsafe { cell.read(Field::VM_INSTRUCTION_ERROR) }.unwrap_or(0);
-            error!("vmx: GUEST-ENTRY FAIL: entry rejected ({fail}); VM-instruction-error {number}");
-        }
-        None => {}
     }
-    // The stack page is live for the whole entry above; keeping it named here
-    // makes that lifetime explicit.
-    drop(stack);
+    warn!("vmx: gave up after {MAX_ENTRIES} entries without a VMCALL");
+    false
 }
 
-/// Reports the reason a guest exited, as a `PASS` when it was the expected
-/// `CPUID`.
-fn report_exit(cell: &Vmcs) {
+/// The basic exit reason the current VMCS records, or `None` if it cannot be
+/// read.
+fn exit_reason(cell: &Vmcs) -> Option<BasicExitReason> {
     // SAFETY: `cell` is the current VMCS on this processor.
-    let reason = unsafe { cell.read(Field::EXIT_REASON) };
-    match reason {
-        Ok(bits) => {
-            let exit = ExitReason::from_bits((bits & 0xFFFF_FFFF) as u32);
-            if exit.basic() == BasicExitReason::CPUID {
-                info!(
-                    "vmx: GUEST-ENTRY PASS: guest launched, ran CPUID and exited (reason {})",
-                    exit.basic().number()
-                );
-            } else {
-                info!(
-                    "vmx: guest exited with reason {} (expected CPUID = 10)",
-                    exit.basic().number()
-                );
-            }
-        }
-        Err(error) => error!("vmx: guest exited but EXIT_REASON could not be read: {error}"),
-    }
+    let bits = unsafe { cell.read(Field::EXIT_REASON) }.ok()?;
+    Some(ExitReason::from_bits((bits & 0xFFFF_FFFF) as u32).basic())
+}
+
+/// Bit 13 of `CR4`: the virtual-machine-extensions enable.
+const CR4_VMXE: u64 = 1 << 13;
+
+/// Whether `CR4.VMXE` is set, which the enable path must have done for `VMXON`
+/// to have succeeded.
+fn cr4_vmxe_set() -> bool {
+    x86_64::registers::control::Cr4::read_raw() & CR4_VMXE != 0
+}
+
+/// Whether writing `value` to `field` and reading it back returns `value`.
+fn roundtrip(cell: &Vmcs, field: vmx::FieldEncoding, value: u64) -> bool {
+    // SAFETY: `cell` is the current VMCS on this processor.
+    let result = unsafe { cell.write(field, value).and_then(|()| cell.read(field)) };
+    matches!(result, Ok(read) if read == value)
 }
 
 /// Leaves VMX operation, logging if the instruction is refused.
