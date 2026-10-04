@@ -23,15 +23,29 @@ exit/event/segment/region/EPT formats, support), `ept` (tree construction),
 `vmcs` pure logic (`error` flag decoding, `fixed` reconciliation), `vmexits`
 (the control-register and EPT-violation exit-qualification decoders).
 
-Proven in VMX operation on an Intel processor (via VirtualBox nested VT-x),
-all twelve self-test checks passing: `VMXON`, `VMCLEAR`/`VMPTRLD`, `VMREAD`/
-`VMWRITE` at every field width, `VMLAUNCH`, `VMRESUME` (resume across multiple
-exits), guest GPR save/restore, RIP advance past an exiting instruction, a guest
-running behind an EPT second translation, switching between two VMCS, and — the
-`vmexits` dispatch loop — a guest driven entirely through `dispatch()`, its
-`CPUID` and `RDMSR` exits emulated and the result checked against the machine's
-own answer, which proves the loop emulates an exit and resumes the guest rather
-than only stepping over the instruction.
+Proven in VMX operation on an Intel processor (via VirtualBox nested VT-x), the
+self-test battery passing in full. The checks, by area:
+
+- **Enable and VMCS management:** `VMXON`, `CR4.VMXE`, `VMCLEAR`/`VMPTRLD`,
+  `VMREAD`/`VMWRITE` at every field width, switching between two VMCS.
+- **World switch:** `VMLAUNCH`, `VMRESUME` across multiple exits, guest GPR
+  save/restore, RIP advance past an exiting instruction.
+- **Second translation:** a guest behind an identity EPT; a guest in its own
+  address space (own `CR3` and page tables) behind a non-identity EPT; an EPT
+  violation demand-mapped into the live tree and flushed with `INVEPT`, the
+  faulting access restarted.
+- **Dispatch loop:** a guest driven through `vmexits::dispatch()`, its `CPUID`
+  and `RDMSR`/`WRMSR` exits emulated and checked against the machine's own
+  answer; `CPUID` concealing the virtualization extension and the hypervisor
+  leaves; `IA32_FEATURE_CONTROL` answered as firmware-locked; a control-register
+  access decoded from its qualification.
+- **Event injection:** an exception, and one carrying an error code, injected
+  through a guest's own IDT and delivered to its handler.
+
+Written, and awaiting the next hardware run: the first APICv slice — the TPR
+shadow virtualizing `CR8` to the virtual-APIC page without an exit, and the TPR
+threshold taking the exit when the shadow drops below it — each with a self-test
+check, unverified until it runs on Intel.
 
 ## Running the self-test on Intel hardware
 
@@ -51,34 +65,32 @@ The self-test runs early in `hv-core::bring_up` (right after `start_clock`) and
 then halts, because everything below it is SVM and cannot run on Intel. It is a
 genuine capability probe, not a mock.
 
-## What remains, roughly in order
+## What is done, and what remains
 
-1. **VMX exit-dispatch loop** (the `exits` counterpart). The skeleton is the
-   `vmexits` crate: `dispatch()` answers `CPUID`, `RDMSR`/`WRMSR`, `HLT`,
-   `VMCALL` and a triple fault, and decodes the control-register and
-   EPT-violation exit qualifications. What it still lacks, roughly in order: the
-   concealment policy on `CPUID` (hide the virtualization extension and the
-   hypervisor leaves, as `exits::cpuid` does), an MSR bitmap so only the
-   registers that need answering exit (today none exits, since no bitmap is
-   programmed — every `RDMSR`/`WRMSR` exits and is forwarded), the handler
-   bodies behind the two decoders (which need real guest memory and
-   control-register virtualization, items 2 below), I/O, and the remaining exit
-   reasons. A refused MSR and both decoded-but-unhandled exits currently stop
-   the guest, because giving it the fault it is owed needs item 3.
-2. **Real guest memory.** Map actual guest RAM through EPT rather than identity,
-   and give the guest its own `CR3` and page tables (or run an unrestricted
-   real-mode guest). A partition-equivalent that owns the guest's EPT and memory.
-3. **Event injection, correctly.** An injected event is delivered through the
-   guest's IDT, not intercepted by the exception bitmap, so a real injection
-   path needs the guest to own an IDT. The field format is in `vmx::event`.
-4. **APICv** (the `svm::avic` / `vlapic` AVIC counterpart): posted interrupts,
-   the virtual-APIC page, the APIC-access page.
-5. **Vendor selection in `hv-core`.** Detect AMD (`CPUID 0x8000000A`) versus
+Done, and proven on Intel (see above): the **exit-dispatch loop** (`vmexits`) —
+`CPUID` with concealment, `RDMSR`/`WRMSR` with concealment, `HLT`, `VMCALL`,
+triple fault, and the control-register and EPT-violation handlers behind their
+decoders; **real guest memory** — a guest with its own `CR3` and page tables
+behind a non-identity EPT, with demand mapping on an EPT violation; and **event
+injection** through a guest's own IDT, with and without an error code.
+
+Remaining, roughly in order:
+
+1. **Finish the dispatch loop.** An MSR bitmap, so only the registers that need
+   answering exit (today no bitmap is programmed, so every `RDMSR`/`WRMSR`
+   exits and is forwarded); I/O; and the remaining exit reasons. A refused MSR
+   still stops the guest, because giving it the fault it is owed is part of the
+   injection work the self-test now proves but the dispatch does not yet apply.
+2. **APICv** (the `svm::avic` / `vlapic` AVIC counterpart). The TPR shadow is
+   the first slice; what remains is the APIC-access page, APIC-register
+   virtualization, virtual-interrupt delivery, and posted interrupts.
+3. **Vendor selection in `hv-core`.** Detect AMD (`CPUID 0x8000000A`) versus
    Intel (`CPUID.1:ECX.VMX`) at boot and drive the SVM (`svm`/`vcpu`/`npt`/
    `exits`) or VMX (`vmx`/`vmcs`/`ept`/`vmexits`) backend behind a shared
-   interface. Today
-   `bring_up` is hardcoded to SVM; this is the refactor that makes one image run
-   on either, and the largest remaining piece.
+   interface. Today `bring_up` is hardcoded to SVM; this is the refactor that
+   makes one image run on either, and the largest remaining piece. Unlike the
+   mechanisms above, finishing it is validated by booting a real guest on an
+   Intel machine, not by the self-test battery.
 
 ## Gotchas learned the hard way
 
@@ -93,9 +105,18 @@ genuine capability probe, not a mock.
 - Every control word must pass `vmx::Capability::reconcile` against its
   capability MSR, and `CR0`/`CR4` must pass `vmcs::fixed::reconcile` against the
   fixed-bit MSRs, or VM entry fails with a `VM-instruction-error`.
-- The self-test guest runs in the host's own address space (`GUEST_CR3` = host
-  `CR3`); the EPT check adds an identity EPT on top. A real guest needs its own
-  address space.
+- Most self-test guests run in the host's own address space (`GUEST_CR3` = host
+  `CR3`), which keeps the probe for one mechanism from depending on the paging
+  of another; the own-address-space and demand-paging guests instead build their
+  own `CR3` and page tables and run behind a non-identity EPT, overriding
+  `GUEST_CR3` after `program_guest`.
+- A guest page added to a live EPT is not visible until `INVEPT` drops the stale
+  translation; an EPT violation does not advance the guest, so the faulting
+  instruction restarts on re-entry.
+- Under the TPR shadow, `CR8` and the task-priority register go to the
+  virtual-APIC page, not the real controller; VM entry itself exits if the
+  seeded `VTPR[7:4]` is below the TPR threshold, so the threshold probe seeds it
+  above and lets the guest's write cross below.
 
 ## Rules that still apply
 
