@@ -1990,6 +1990,21 @@ fn apic_access_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         return false;
     }
 
+    // SAFETY: `cell` is current; these control fields are readable to show what
+    // was actually programmed, which is what the triggering depends on.
+    let (primary, secondary, vapic_field, access_field) = unsafe {
+        (
+            cell.read(Field::PRIMARY_PROC_CONTROLS).unwrap_or(0),
+            cell.read(Field::SECONDARY_PROC_CONTROLS).unwrap_or(0),
+            cell.read(Field::VIRTUAL_APIC_ADDR).unwrap_or(0),
+            cell.read(Field::APIC_ACCESS_ADDR).unwrap_or(0),
+        )
+    };
+    info!(
+        "vmx: APIC-access programmed: primary {primary:#x}, secondary {secondary:#x}, vapic {vapic_field:#x}, access {access_field:#x}, guest-addr {guest_apic_addr:#x}, cap2 {:#x}",
+        probe::read(IA32_VMX_PROCBASED_CTLS2).unwrap_or(0)
+    );
+
     let mut registers = Registers::default();
     registers.rdi = guest_apic_addr;
     // SAFETY: `cell` is current and fully programmed.
