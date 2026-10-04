@@ -125,6 +125,43 @@ pub unsafe fn vmptrld(vmcs: PhysAddr) -> Outcome {
     Outcome::from_flags(flags)
 }
 
+/// Invalidates the cached EPT translations for the single context `eptp`.
+///
+/// After an entry under a live EPT is added or changed, the processor may still
+/// answer a guest access from a translation it cached before the change; this
+/// drops the cached translations for that one EPT, so a change to a live tree
+/// must be followed by it. `eptp` is the pointer exactly as the VMCS carries
+/// it.
+///
+/// # Errors
+///
+/// [`VmFail`] if the instruction is refused — EPT not in use on this processor,
+/// or single-context invalidation unsupported.
+///
+/// # Safety
+///
+/// This processor must be in VMX operation, and `eptp` must name the EPT whose
+/// cached translations are to be dropped.
+#[must_use]
+pub unsafe fn invept_single(eptp: u64) -> Outcome {
+    let descriptor: [u64; 2] = [eptp, 0];
+    let flags: u64;
+    // SAFETY: the caller guarantees VMX operation; `descriptor` is a live,
+    // 16-byte local the instruction reads its operand from, and the type
+    // register holds 1, the single-context invalidation.
+    unsafe {
+        core::arch::asm!(
+            "invept {ty}, [{desc}]",
+            "pushfq",
+            "pop {flags}",
+            ty = in(reg) 1_u64,
+            desc = in(reg) descriptor.as_ptr(),
+            flags = out(reg) flags,
+        );
+    }
+    Outcome::from_flags(flags)
+}
+
 /// Reads the current VMCS's `field`.
 ///
 /// # Errors
