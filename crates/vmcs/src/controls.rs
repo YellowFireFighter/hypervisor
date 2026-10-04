@@ -13,7 +13,7 @@
 //! own bits) and the VMCS link pointer (no shadow).
 
 use vmx::{
-    Capability, EptPointer, Field, PrimaryProc, SecondaryProc, VmEntry, VmExit, VmxBasic,
+    Capability, EptPointer, Field, PinBased, PrimaryProc, SecondaryProc, VmEntry, VmExit, VmxBasic,
     basic::IA32_VMX_BASIC,
     control::{
         IA32_VMX_ENTRY_CTLS, IA32_VMX_EXIT_CTLS, IA32_VMX_PINBASED_CTLS, IA32_VMX_PROCBASED_CTLS,
@@ -252,4 +252,34 @@ pub unsafe fn apic_virtualization_available() -> bool {
         SecondaryProc::VIRTUALIZE_APIC_ACCESSES.bits()
             | SecondaryProc::APIC_REGISTER_VIRTUALIZATION.bits(),
     )
+}
+
+/// Arms the VMX-preemption timer, so the guest exits after it counts `value`
+/// down to zero and the exit can be acted on — sampling where a guest that
+/// otherwise never exits is spending its time, above all.
+///
+/// The value reloads from the field on every entry, so a caller that re-enters
+/// without rewriting it is preempted again each quantum. The pin control is
+/// reconciled against the capability register, so a processor that does not
+/// offer the timer is left without it rather than refused entry.
+///
+/// # Errors
+///
+/// The [`VmFail`] from the first field access the processor rejects.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+pub unsafe fn set_preemption_timer(cell: &Vmcs, value: u32) -> Result<(), VmFail> {
+    // SAFETY: the caller guarantees the current VMCS in VMX operation, on which
+    // the capability register exists.
+    unsafe {
+        let capability = Capability::from_bits(msr::rdmsr(IA32_VMX_PINBASED_CTLS));
+        let existing = u32::try_from(cell.read(Field::PIN_BASED_CONTROLS)?).unwrap_or(0);
+        let reconciled =
+            capability.reconcile(existing | PinBased::ACTIVATE_PREEMPTION_TIMER.bits());
+        cell.write(Field::PIN_BASED_CONTROLS, u64::from(reconciled))?;
+        cell.write(Field::VMX_PREEMPTION_TIMER_VALUE, u64::from(value))?;
+    }
+    Ok(())
 }
