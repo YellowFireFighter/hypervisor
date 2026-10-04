@@ -78,7 +78,7 @@ const PREEMPTION_QUANTUM: u32 = 0x8000;
 const SPIN_THRESHOLD: u32 = 1000;
 
 /// The most preemption quanta the probe samples before stopping regardless.
-const SAMPLE_BUDGET: u32 = 30_000;
+const SAMPLE_BUDGET: u32 = 64;
 
 /// The most distinct instruction pointers the sampler logs, so a guest making
 /// steady progress does not flood the log.
@@ -247,12 +247,15 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff:
     // inter-processor interrupts that reset the machine above all — reach a
     // virtual controller rather than the real one. Kept alive until the run
     // ends, because the processor reads the virtual-APIC page throughout it.
-    let _apic_pages = setup_apic(space, firmware, &mut memory, eptp.root(), &cell);
+    let apic_pages = setup_apic(space, firmware, &mut memory, eptp.root(), &cell);
+    let vapic_addr = apic_pages
+        .as_ref()
+        .map(|(vapic, _)| core::ptr::from_ref(&vapic.0).addr() as u64);
 
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
     unsafe { predict(&cell) };
 
-    resume(&mut cell, &portal);
+    resume(&mut cell, &portal, vapic_addr);
 
     cleanup(&cell);
     // SAFETY: `cell` is no longer current after `cleanup`, the precondition for
@@ -270,9 +273,10 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff:
 /// The run loop returns on every `VMCALL`, which is how the portal speaks to
 /// the host; each is answered, the instruction stepped over, and the guest
 /// resumed, until a notification ends the probe or the guest stops another way.
-fn resume(cell: &mut Vmcs, portal: &Portal) {
+fn resume(cell: &mut Vmcs, portal: &Portal, vapic_addr: Option<u64>) {
     let mut registers = Registers::default();
     let mut partition = Identity;
+    let mut dumped = false;
     // Arm the preemption timer, so a guest that spins without ever exiting is
     // still forced out each quantum and the resume loop can see where it is.
     // SAFETY: `cell` is the current VMCS in VMX operation.
@@ -294,6 +298,15 @@ fn resume(cell: &mut Vmcs, portal: &Portal) {
                 }
             }
             Exit::Stopped(Stop::Unhandled(BasicExitReason::PREEMPTION_TIMER_EXPIRED)) => {
+                if !dumped {
+                    if let Some(addr) = vapic_addr {
+                        // SAFETY: `addr` names the live, held virtual-APIC page,
+                        // and the guest is not running during this exit, so
+                        // reading it races nothing.
+                        unsafe { dump_vapic(addr) };
+                    }
+                    dumped = true;
+                }
                 if sample(cell, &mut last_rip, &mut same, &mut total, &mut logged) {
                     break;
                 }
@@ -304,6 +317,50 @@ fn resume(cell: &mut Vmcs, portal: &Portal) {
             }
         }
     }
+}
+
+/// Logs the virtual-APIC registers the guest left behind, to show what a stuck
+/// guest is waiting on: a pending interrupt it never takes, an in-service one
+/// it never finishes, or a timer it set and is waiting out.
+///
+/// # Safety
+///
+/// `addr` must name the live, page-sized virtual-APIC page, and nothing else
+/// may be writing it — which holds at a preemption exit, where the guest is not
+/// running.
+unsafe fn dump_vapic(addr: u64) {
+    // SAFETY: the caller guarantees a live page-sized region at `addr`.
+    let page = unsafe { core::slice::from_raw_parts(addr as *const u8, PAGE_BYTES) };
+    let reg = |offset: usize| {
+        u32::from_le_bytes([
+            page[offset],
+            page[offset + 1],
+            page[offset + 2],
+            page[offset + 3],
+        ])
+    };
+    info!(
+        "vmxboot: vAPIC tpr {:#x} ppr {:#x} spurious {:#x} lvt-timer {:#x} timer-init {:#x} timer-cur {:#x} divide {:#x}",
+        reg(APIC_TASK_PRIORITY),
+        reg(APIC_PROCESSOR_PRIORITY),
+        reg(APIC_SPURIOUS),
+        reg(APIC_LVT_TIMER),
+        reg(APIC_TIMER_INITIAL_COUNT),
+        reg(APIC_TIMER_CURRENT_COUNT),
+        reg(APIC_TIMER_DIVIDE),
+    );
+    let bank =
+        |base: usize| core::array::from_fn::<u32, 8, _>(|i| reg(base + i * APIC_REGISTER_STRIDE));
+    info!("vmxboot: vAPIC isr {:#x?}", bank(APIC_IN_SERVICE));
+    info!("vmxboot: vAPIC irr {:#x?}", bank(APIC_INTERRUPT_REQUEST));
+    info!(
+        "vmxboot: vAPIC icr {:#x}:{:#x} lint0 {:#x} lint1 {:#x} lvt-error {:#x}",
+        reg(APIC_COMMAND_LOW),
+        reg(APIC_COMMAND_HIGH),
+        reg(APIC_LVT_LINT0),
+        reg(APIC_LVT_LINT1),
+        reg(APIC_LVT_ERROR),
+    );
 }
 
 /// Records where a preemption-timer exit caught the guest and says whether the
