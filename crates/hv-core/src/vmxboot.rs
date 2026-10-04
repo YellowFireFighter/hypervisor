@@ -71,18 +71,28 @@ const CALL_STACK_ALIGN: u64 = 16;
 /// How long the preemption timer runs before forcing an exit, in the units the
 /// processor counts it in. Short enough to sample a spin promptly, long enough
 /// that a guest making progress runs meaningfully between samples.
-const PREEMPTION_QUANTUM: u32 = 0x8000;
+const PREEMPTION_QUANTUM: u32 = 0x1000;
 
 /// How many quanta the guest may sit at one instruction pointer before it is
 /// declared stuck there.
 const SPIN_THRESHOLD: u32 = 1000;
 
 /// The most preemption quanta the probe samples before stopping regardless.
-const SAMPLE_BUDGET: u32 = 64;
+const SAMPLE_BUDGET: u32 = 1500;
 
 /// The most distinct instruction pointers the sampler logs, so a guest making
 /// steady progress does not flood the log.
-const SAMPLE_LOG_LIMIT: u32 = 16;
+const SAMPLE_LOG_LIMIT: u32 = 24;
+
+/// Bit 16 of a local-vector-table entry: the interrupt is masked.
+const LVT_MASKED: u32 = 1 << 16;
+
+/// Bit 9 of `RFLAGS`: maskable interrupts are enabled.
+const RFLAGS_INTERRUPT_ENABLE: u64 = 1 << 9;
+
+/// How far the virtual timer's initial count is shifted to get its per-quantum
+/// step, so it counts down over roughly this many quanta.
+const TIMER_STEP_SHIFT: u32 = 4;
 
 /// The four VMCS fields that describe one guest segment: selector, base, limit
 /// and access rights.
@@ -298,14 +308,17 @@ fn resume(cell: &mut Vmcs, portal: &Portal, vapic_addr: Option<u64>) {
                 }
             }
             Exit::Stopped(Stop::Unhandled(BasicExitReason::PREEMPTION_TIMER_EXPIRED)) => {
-                if !dumped {
-                    if let Some(addr) = vapic_addr {
+                if let Some(addr) = vapic_addr {
+                    if !dumped {
                         // SAFETY: `addr` names the live, held virtual-APIC page,
                         // and the guest is not running during this exit, so
                         // reading it races nothing.
                         unsafe { dump_vapic(addr) };
+                        dumped = true;
                     }
-                    dumped = true;
+                    // SAFETY: as above; `cell` is current, so the guest state
+                    // the injection consults is readable and writable.
+                    unsafe { drive_timer(cell, addr) };
                 }
                 if sample(cell, &mut last_rip, &mut same, &mut total, &mut logged) {
                     break;
@@ -319,9 +332,72 @@ fn resume(cell: &mut Vmcs, portal: &Portal, vapic_addr: Option<u64>) {
     }
 }
 
+/// Ticks the guest's virtual-APIC timer and, when the guest can take it,
+/// injects the timer interrupt.
+///
+/// The virtual-APIC page is memory, so its timer does not count on its own: a
+/// guest waiting out a delay on the current-count register, or waiting for the
+/// periodic timer's interrupt, would wait forever. Each quantum this decrements
+/// the current count (reloading from the initial count when it runs out, as a
+/// periodic timer does) and, if the timer is unmasked and the guest has
+/// interrupts enabled and is not in an interrupt shadow, injects the vector the
+/// timer entry names. It is a coarse timer — one tick per preemption quantum —
+/// but it is one that moves, which is what a stuck guest needs.
+///
+/// # Safety
+///
+/// `addr` must name the live, page-sized virtual-APIC page with nothing else
+/// writing it, and `cell` must be the current VMCS in VMX operation.
+unsafe fn drive_timer(cell: &Vmcs, addr: u64) {
+    // SAFETY: the caller guarantees a live page-sized region at `addr` that the
+    // guest is not racing, and this writes only within it.
+    let page = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, PAGE_BYTES) };
+    let read = |page: &[u8], offset: usize| {
+        u32::from_le_bytes([
+            page[offset],
+            page[offset + 1],
+            page[offset + 2],
+            page[offset + 3],
+        ])
+    };
+    let lvt = read(page, APIC_LVT_TIMER);
+    if lvt & LVT_MASKED != 0 {
+        return;
+    }
+    let initial = read(page, APIC_TIMER_INITIAL_COUNT);
+    let current = read(page, APIC_TIMER_CURRENT_COUNT);
+    let step = (initial >> TIMER_STEP_SHIFT).max(1);
+    let next = if current > step {
+        current - step
+    } else {
+        initial
+    };
+    page[APIC_TIMER_CURRENT_COUNT..APIC_TIMER_CURRENT_COUNT + 4]
+        .copy_from_slice(&next.to_le_bytes());
+
+    // SAFETY: `cell` is current; these guest-state fields are readable, and the
+    // entry interruption field is writable, after any exit.
+    let (rflags, interruptibility) = unsafe {
+        (
+            cell.read(Field::GUEST_RFLAGS).unwrap_or(0),
+            cell.read(Field::GUEST_INTERRUPTIBILITY_STATE).unwrap_or(0),
+        )
+    };
+    if rflags & RFLAGS_INTERRUPT_ENABLE == 0 || interruptibility != 0 {
+        return;
+    }
+    let vector = u8::try_from(lvt & 0xFF).unwrap_or(0);
+    let event = Interruption::inject(vector, vmx::event::Kind::External, false);
+    // SAFETY: `cell` is current; the guest is interruptible, so an external
+    // interrupt may be delivered on the next entry.
+    let _ = unsafe { cell.write(Field::VM_ENTRY_INTERRUPTION_INFO, u64::from(event.bits())) };
+}
+
 /// Logs the virtual-APIC registers the guest left behind, to show what a stuck
-/// guest is waiting on: a pending interrupt it never takes, an in-service one
-/// it never finishes, or a timer it set and is waiting out.
+/// guest is waiting on:/// Logs the virtual-APIC registers the guest left
+/// behind, to show what a stuck guest is waiting on: a pending interrupt it
+/// never takes, an in-service one it never finishes, or a timer it set and is
+/// waiting out.
 ///
 /// # Safety
 ///
