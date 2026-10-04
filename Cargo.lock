@@ -574,6 +574,7 @@ dependencies = [
  "cpu",
  "descriptors",
  "emulate",
+ "ept",
  "exits",
  "handoff",
  "ipi",
