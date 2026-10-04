@@ -179,3 +179,77 @@ pub unsafe fn relax_cr3_exiting(cell: &Vmcs) -> Result<bool, VmFail> {
     }
     Ok(true)
 }
+
+/// Turns on APIC virtualization for the current VMCS, pointing it at a
+/// virtual-APIC page the guest's register accesses are served from and an
+/// APIC-access page whose guest-physical mapping the processor watches.
+///
+/// With this on, the guest's reads of its local APIC, and most of its writes,
+/// are satisfied against the virtual-APIC page without reaching the real
+/// controller; the writes that still need the host — the interrupt command
+/// among them — leave the value in the page and exit with
+/// [`APIC_WRITE`](vmx::BasicExitReason::APIC_WRITE). The processor must allow
+/// both the access and the register-virtualization controls — a VMX-capable
+/// machine with an on-die APIC does — and this leaves whichever it is refused
+/// clear, so the caller checks the result it reads back if it must.
+///
+/// Call it after [`program`], whose primary and secondary control words it adds
+/// to. The EPT must map the guest's APIC page to `access_phys` as a 4-KiB leaf,
+/// which is what makes an access to it recognizable.
+///
+/// # Errors
+///
+/// The [`VmFail`] from the first field access the processor rejects.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+pub unsafe fn virtualize_apic(
+    cell: &Vmcs,
+    vapic_phys: u64,
+    access_phys: u64,
+) -> Result<(), VmFail> {
+    // SAFETY: the caller guarantees the current VMCS in VMX operation, on which
+    // the capability register read here exists.
+    unsafe {
+        let primary = cell.read(Field::PRIMARY_PROC_CONTROLS)?;
+        cell.write(
+            Field::PRIMARY_PROC_CONTROLS,
+            primary
+                | u64::from(
+                    PrimaryProc::USE_TPR_SHADOW.bits()
+                        | PrimaryProc::ACTIVATE_SECONDARY_CONTROLS.bits(),
+                ),
+        )?;
+        let capability = Capability::from_bits(msr::rdmsr(IA32_VMX_PROCBASED_CTLS2));
+        let existing = u32::try_from(cell.read(Field::SECONDARY_PROC_CONTROLS)?).unwrap_or(0);
+        let desired = existing
+            | SecondaryProc::VIRTUALIZE_APIC_ACCESSES.bits()
+            | SecondaryProc::APIC_REGISTER_VIRTUALIZATION.bits();
+        cell.write(
+            Field::SECONDARY_PROC_CONTROLS,
+            u64::from(capability.reconcile(desired)),
+        )?;
+        cell.write(Field::VIRTUAL_APIC_ADDR, vapic_phys)?;
+        cell.write(Field::APIC_ACCESS_ADDR, access_phys)?;
+        cell.write(Field::TPR_THRESHOLD, 0)?;
+    }
+    Ok(())
+}
+
+/// Whether this processor can virtualize a guest's APIC accesses and registers,
+/// which [`virtualize_apic`] needs.
+///
+/// # Safety
+///
+/// This processor must support VMX, so the capability register read here
+/// exists.
+#[must_use]
+pub unsafe fn apic_virtualization_available() -> bool {
+    // SAFETY: the caller guarantees a VMX-capable processor.
+    let capability = Capability::from_bits(unsafe { msr::rdmsr(IA32_VMX_PROCBASED_CTLS2) });
+    capability.allows(
+        SecondaryProc::VIRTUALIZE_APIC_ACCESSES.bits()
+            | SecondaryProc::APIC_REGISTER_VIRTUALIZATION.bits(),
+    )
+}
