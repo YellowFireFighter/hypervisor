@@ -1,11 +1,13 @@
 //! The world switch: entering a guest and coming back.
 //!
-//! The counterpart to `vcpu`'s `switch`, and the one piece of the Intel path
-//! that could not be written until it could be run, because its correctness is
-//! in register discipline that no review fully settles. VMX saves and restores
-//! almost nothing of the general registers itself — only `RSP` and `RIP`, which
-//! live in the VMCS — so this loads the guest's registers before entry and
-//! saves them on exit by hand, around `VMLAUNCH` or `VMRESUME`.
+//! The counterpart to `vcpu`'s `switch`, and the piece of the Intel path whose
+//! correctness is in register discipline that no review fully settles. VMX
+//! saves and restores almost nothing of the general registers itself — only
+//! `RSP` and `RIP`, which live in the VMCS — so this loads the guest's
+//! registers before entry and saves them on exit by hand, around `VMLAUNCH` or
+//! `VMRESUME`. It has launched a guest on an Intel processor and brought
+//! control back cleanly through the exit path below; the resume path has not
+//! yet been taken.
 //!
 //! # How control comes back
 //!
