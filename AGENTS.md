@@ -76,6 +76,10 @@ pulzar/
   libraries themselves are target-agnostic `no_std` crates that plain
   `cargo build` compiles for the host too — which is what lets
   `cargo test -p <crate>` run natively. `xtask` builds for the host as well.
+- An Intel VMX backend is being built alongside the AMD SVM one, in the `vmx`,
+  `ept` and `vmcs` crates, with a feature-gated self-test in `hv-core`. Its
+  status, how to run it on Intel hardware, and the work that remains are in
+  `docs/intel-vmx-port.md` — read it before continuing that work.
 
 ## 3. Toolchain and build
 
