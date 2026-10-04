@@ -241,7 +241,7 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
         // rather than faulting on the first SVM instruction.
         #[cfg(feature = "vmx-boot")]
         {
-            vmxboot::attempt(&space, firmware, handoff);
+            vmxboot::attempt(&mut space, firmware, handoff);
             return Err(CoreError::VmxBootProbeComplete);
         }
         #[cfg(not(feature = "vmx-boot"))]

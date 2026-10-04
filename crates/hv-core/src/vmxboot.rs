@@ -38,12 +38,12 @@ use apic::LocalState;
 use ept::{ENTRIES, Memory};
 use handoff::Handoff;
 use log::{error, info, warn};
-use paging::AddressSpace;
+use paging::{AddressSpace, CacheType, Mapping, Protection};
 use portal::{Notification, Portal};
 use snapshot::FirmwareContext;
 use svm::{SaveArea, Segment, SegmentAttributes};
 use vmcs::{Registers, VmFail, Vmcs, controls, fixed, host, inspect, instr};
-use vmexits::{Exit, Partition, Stop};
+use vmexits::{ApicWrites, Exit, Partition, Stop};
 use vmx::{
     AccessRights, BasicExitReason, EptAccess, EptEntry, EptMemoryType, Field, FieldEncoding,
     Interruption, PAGE_BYTES,
@@ -116,6 +116,11 @@ const MIN_DELIVERABLE_VECTOR: u32 = 0x10;
 /// waits on.
 const SPIN_CODE_BYTES: u64 = 32;
 
+/// Byte offset of the end-of-interrupt register in the APIC page. The one
+/// virtualized-APIC write whose effect the host completes on the real
+/// controller, so interrupt delivery does not stall after the first interrupt.
+const APIC_END_OF_INTERRUPT: u32 = 0xB0;
+
 /// The four VMCS fields that describe one guest segment: selector, base, limit
 /// and access rights.
 type SegmentFields = (FieldEncoding, FieldEncoding, FieldEncoding, FieldEncoding);
@@ -174,12 +179,91 @@ impl Partition for Identity {
     }
 }
 
+/// Completes the firmware guest's end-of-interrupt on the real local APIC.
+///
+/// The guest's APIC is virtualized, so its end-of-interrupt writes land in the
+/// virtual-APIC page and never reach the real controller. Left there, the real
+/// local APIC's in-service state never clears and it stops delivering the
+/// periodic interrupt firmware's event loop runs on, which is what freezes a
+/// firmware guest that is otherwise making progress. This forwards that one
+/// write — and only it, so the inter-processor interrupts the virtualization
+/// exists to swallow still stay in the page.
+struct ApicForward {
+    /// The real local APIC's end-of-interrupt register, mapped for the host in
+    /// xAPIC mode; `None` leaves every write in the virtual page, as when the
+    /// controller is in x2APIC mode and reached through model-specific
+    /// registers this does not map.
+    eoi: Option<*mut u32>,
+}
+
+impl ApicWrites for ApicForward {
+    fn wrote(&mut self, offset: u32) {
+        if offset != APIC_END_OF_INTERRUPT {
+            return;
+        }
+        if let Some(eoi) = self.eoi {
+            // SAFETY: `eoi` addresses the live uncached mapping of the real
+            // local APIC's end-of-interrupt register; writing there completes
+            // the interrupt the guest just finished, and the guest is not
+            // running during this exit, so nothing races the write.
+            unsafe { eoi.write_volatile(0) };
+        }
+    }
+}
+
+/// Maps the real local APIC so the host can complete the firmware guest's
+/// end-of-interrupt on it, returning the mapping to keep alive for the run.
+///
+/// Only in xAPIC mode, where the controller is reached through this page.
+/// x2APIC reaches it through model-specific registers, which this does not map;
+/// there the guest's end-of-interrupt stays in the virtual page, as it did
+/// before.
+fn map_apic_eoi(space: &mut AddressSpace, firmware: &FirmwareContext) -> Option<Mapping> {
+    if firmware.interrupts.base & X2APIC_ENABLE != 0 {
+        return None;
+    }
+    let base = firmware.interrupts.base & !(PAGE_BYTES as u64 - 1);
+    let Ok(phys) = PhysAddr::try_new(base) else {
+        warn!("vmxboot: the APIC base {base:#x} is not a physical address to map");
+        return None;
+    };
+    // SAFETY: `base` is the local APIC's register page, MMIO firmware owns and
+    // this processor already reaches; mapping it read-write and uncached lets
+    // the host complete end-of-interrupts on the real controller.
+    let mapping = unsafe {
+        space.map_physical(
+            phys,
+            PAGE_BYTES as u64,
+            Protection::ReadWrite,
+            CacheType::Uncached,
+        )
+    };
+    match mapping {
+        Ok(mapping) => Some(mapping),
+        Err(error) => {
+            warn!("vmxboot: could not map the local APIC to forward end-of-interrupt: {error:?}");
+            None
+        }
+    }
+}
+
 /// Enters the captured firmware as a VMX guest and reports the outcome.
 ///
 /// Always returns, having logged how far it got; the caller halts afterward,
 /// because this is a probe and there is no guest loop to stay in yet.
-pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff: &Handoff) {
+pub(crate) fn attempt(space: &mut AddressSpace, firmware: &FirmwareContext, handoff: &Handoff) {
     info!("vmxboot: entering VMX to run the captured firmware as a guest");
+
+    // Map the real local APIC up front, while the address space can still be
+    // borrowed mutably, so the guest's end-of-interrupt can be completed on it.
+    // Kept alive to the end of the run, because the forwarding reads through it.
+    let lapic = map_apic_eoi(space, firmware);
+    let apic_eoi = lapic
+        .as_ref()
+        .map(|mapping| (mapping.addr().as_u64() + u64::from(APIC_END_OF_INTERRUPT)) as *mut u32);
+    // The mapping above is the only mutable use of the address space; everything
+    // below reads it, so reborrow it shared for the rest of the run.
+    let space: &AddressSpace = space;
 
     let mut vmxon = Page::zeroed();
     let mut vmcs = Page::zeroed();
@@ -287,7 +371,7 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff:
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
     unsafe { predict(&cell) };
 
-    resume(&mut cell, &portal, vapic_addr, space);
+    resume(&mut cell, &portal, vapic_addr, space, apic_eoi);
 
     cleanup(&cell);
     // SAFETY: `cell` is no longer current after `cleanup`, the precondition for
@@ -305,9 +389,16 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff:
 /// The run loop returns on every `VMCALL`, which is how the portal speaks to
 /// the host; each is answered, the instruction stepped over, and the guest
 /// resumed, until a notification ends the probe or the guest stops another way.
-fn resume(cell: &mut Vmcs, portal: &Portal, vapic_addr: Option<u64>, space: &AddressSpace) {
+fn resume(
+    cell: &mut Vmcs,
+    portal: &Portal,
+    vapic_addr: Option<u64>,
+    space: &AddressSpace,
+    apic_eoi: Option<*mut u32>,
+) {
     let mut registers = Registers::default();
     let mut partition = Identity;
+    let mut apic = ApicForward { eoi: apic_eoi };
     let mut dumped = false;
     // Arm the preemption timer, so a guest that spins without ever exiting is
     // still forced out each quantum and the resume loop can see where it is.
@@ -323,7 +414,7 @@ fn resume(cell: &mut Vmcs, portal: &Portal, vapic_addr: Option<u64>, space: &Add
         // SAFETY: `cell` is the current, fully programmed VMCS, this processor
         // is in VMX operation, and bring-up installed the general-protection
         // vector the forwarding relies on; the loop preserves that each entry.
-        match unsafe { vmexits::run(cell, &mut registers, &mut partition) } {
+        match unsafe { vmexits::run(cell, &mut registers, &mut partition, &mut apic) } {
             Exit::Vmcall => {
                 if !notified(cell, &registers, portal) {
                     break;

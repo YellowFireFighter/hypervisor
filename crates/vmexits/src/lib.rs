@@ -67,6 +67,13 @@ pub enum Flow {
     Resume,
     /// The guest made a `VMCALL`; what it means is the caller's to answer.
     Vmcall,
+    /// The guest wrote a register of its virtualized APIC that the processor
+    /// leaves to the host to complete; the carried value is the register's byte
+    /// offset in the APIC page. The write itself already stands in the
+    /// virtual-APIC page — what remains is the effect the processor does not
+    /// carry out, an end-of-interrupt on the real controller above all, which
+    /// [`run`] hands to its [`ApicWrites`] sink.
+    ApicWrite(u32),
     /// The guest cannot be resumed; the reason says why.
     Stop(Stop),
 }
@@ -115,6 +122,23 @@ pub trait Partition {
     /// changes the EPT must flush the stale translation itself before
     /// returning.
     fn fault(&mut self, gpa: u64) -> bool;
+}
+
+/// Completes a guest's virtualized-APIC write where the processor leaves the
+/// effect to the host.
+///
+/// A guest whose APIC is virtualized writes its registers to the virtual-APIC
+/// page, and the processor carries out most of what each write means itself but
+/// leaves some to the host — the end-of-interrupt above all. Until an
+/// end-of-interrupt is completed on the real local APIC, that controller's
+/// in-service state never clears and it delivers no further interrupt of the
+/// same or lower priority, so a guest waiting on a periodic interrupt waits
+/// forever. The run loop calls [`wrote`](ApicWrites::wrote) on each such write
+/// so the owner of the real controller can carry the effect out.
+pub trait ApicWrites {
+    /// The guest wrote the virtualized-APIC register at byte `offset` in the
+    /// APIC page.
+    fn wrote(&mut self, offset: u32);
 }
 
 /// How a run of a guest ended.
@@ -191,13 +215,18 @@ pub unsafe fn dispatch(cell: &Vmcs, registers: &mut Registers) -> Flow {
         }
         BasicExitReason::APIC_WRITE => {
             // The guest wrote a register of its virtualized APIC. The value is
-            // already in the virtual-APIC page; carrying its effect onto the
-            // machine — an inter-processor interrupt above all — is the virtual
-            // controller's work, which this layer does not drive yet, so the
-            // write stands in the page and the guest resumes. The exit is
-            // trap-like, taken after the instruction, so the RIP is already
-            // past it and must not be advanced.
-            Flow::Resume
+            // already in the virtual-APIC page; which register it was is the low
+            // twelve bits of the exit qualification, the byte offset of the
+            // write. Carrying the effect the processor leaves to the host — an
+            // end-of-interrupt on the real controller above all — is the
+            // caller's to do, so the offset is handed back rather than acted on
+            // here. The exit is trap-like, taken after the instruction, so the
+            // RIP is already past it and must not be advanced.
+            // SAFETY: `cell` is current; the exit qualification is readable.
+            match unsafe { cell.read(Field::EXIT_QUALIFICATION) } {
+                Ok(bits) => Flow::ApicWrite(u32::try_from(bits & 0xFFF).unwrap_or(0)),
+                Err(fail) => Flow::Stop(Stop::Vmcs(fail)),
+            }
         }
         BasicExitReason::VMCLEAR
         | BasicExitReason::VMLAUNCH
@@ -242,8 +271,9 @@ unsafe fn advance(cell: &Vmcs) -> Flow {
 /// exit and asking `partition` to resolve each EPT violation.
 ///
 /// This is the VMX counterpart to the SVM run loop: it enters the guest, hands
-/// each exit to [`dispatch`], resumes on the ones that were answered, and asks
-/// the [`Partition`] to resolve an EPT violation and retry — returning
+/// each exit to [`dispatch`], resumes on the ones that were answered, asks the
+/// [`Partition`] to resolve an EPT violation and retry, and asks `apic` to
+/// complete an APIC write the processor left to the host — returning
 /// [`Exit::Vmcall`] when the guest calls into the host and [`Exit::Stopped`]
 /// when it cannot go on.
 ///
@@ -257,6 +287,7 @@ pub unsafe fn run(
     cell: &mut Vmcs,
     registers: &mut Registers,
     partition: &mut impl Partition,
+    apic: &mut impl ApicWrites,
 ) -> Exit {
     loop {
         // SAFETY: the caller guarantees a current, fully programmed VMCS in VMX
@@ -267,6 +298,7 @@ pub unsafe fn run(
             // on and `registers` holds the state the world switch saved.
             Entered::Exited => match unsafe { dispatch(cell, registers) } {
                 Flow::Resume => {}
+                Flow::ApicWrite(offset) => apic.wrote(offset),
                 Flow::Vmcall => return Exit::Vmcall,
                 Flow::Stop(Stop::EptViolation(violation)) => {
                     // SAFETY: `cell` is current, so the faulting address is

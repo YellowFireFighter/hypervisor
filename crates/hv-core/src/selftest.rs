@@ -565,7 +565,7 @@ fn drive_dispatch(cell: &mut Vmcs, registers: &mut Registers) -> bool {
                 // loop just filled; `probe::install` claimed the
                 // general-protection vector during bring-up.
                 match unsafe { vmexits::dispatch(cell, registers) } {
-                    Flow::Resume => {}
+                    Flow::Resume | Flow::ApicWrite(_) => {}
                     Flow::Vmcall => return true,
                     Flow::Stop(stop) => {
                         error!("vmx: dispatch stopped the guest: {stop:?}");
@@ -1663,7 +1663,7 @@ fn run_loop_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
     // SAFETY: `cell` is current and fully programmed, probe has claimed the
     // general-protection vector, and the partition resolves faults in VMX
     // operation.
-    let exit = unsafe { vmexits::run(cell, &mut registers, &mut partition) };
+    let exit = unsafe { vmexits::run(cell, &mut registers, &mut partition, &mut NoApicWrites) };
     let expected = processor::cpuid(1, 0);
     let ok = exit == Exit::Vmcall
         && registers.r8 == GUEST_PLANTED
@@ -1686,6 +1686,14 @@ impl Partition for Unmapped {
     fn fault(&mut self, _gpa: u64) -> bool {
         false
     }
+}
+
+/// An APIC-write sink that does nothing, for self-test guests that do not
+/// virtualize their APIC and so never take an APIC-write exit.
+struct NoApicWrites;
+
+impl vmexits::ApicWrites for NoApicWrites {
+    fn wrote(&mut self, _offset: u32) {}
 }
 
 /// The command word the hypercall guest issues, an aligned buffer address, and
@@ -1738,7 +1746,7 @@ fn hypercall_probe(cell: &mut Vmcs) -> bool {
     let mut registers = Registers::default();
     let mut unmapped = Unmapped;
     // SAFETY: `cell` is current and fully programmed, and no EPT means no fault.
-    let made = unsafe { vmexits::run(cell, &mut registers, &mut unmapped) };
+    let made = unsafe { vmexits::run(cell, &mut registers, &mut unmapped, &mut NoApicWrites) };
     let decoded = hypercall::decode(registers.rax, registers.rdi, registers.rsi);
     let request_ok = matches!(
         decoded,
@@ -1752,7 +1760,7 @@ fn hypercall_probe(cell: &mut Vmcs) -> bool {
     // SAFETY: `cell` is current and the exit was on the hypercall VMCALL.
     let advanced = unsafe { cell.advance_past_instruction() }.is_ok();
     // SAFETY: `cell` is current and programmed.
-    let done = unsafe { vmexits::run(cell, &mut registers, &mut unmapped) };
+    let done = unsafe { vmexits::run(cell, &mut registers, &mut unmapped, &mut NoApicWrites) };
 
     let ok = made == Exit::Vmcall
         && request_ok
@@ -1847,7 +1855,7 @@ fn msr_bitmap_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
                 let reason = exit_reason(cell);
                 // SAFETY: the guest exited and `registers` holds its state.
                 match unsafe { vmexits::dispatch(cell, &mut registers) } {
-                    Flow::Resume => {
+                    Flow::Resume | Flow::ApicWrite(_) => {
                         if reason == Some(BasicExitReason::RDMSR) {
                             rdmsr_exits += 1;
                         }
