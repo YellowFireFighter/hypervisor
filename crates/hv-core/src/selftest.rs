@@ -22,7 +22,7 @@ use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
 use vmexits::{Flow, Stop};
 use vmx::{
     BasicExitReason, EptAccess, EptEntry, EptMemoryType, EptPointer, ExitReason, Field,
-    Interruption, PAGE_BYTES, VmxBasic, event::Kind,
+    Interruption, PAGE_BYTES, PrimaryProc, VmxBasic, event::Kind,
 };
 use x86_64::{
     VirtAddr,
@@ -216,6 +216,14 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
     check(
         "control-register access decoded from its qualification",
         cr_access_probe(cell),
+    );
+    check(
+        "TPR shadow virtualizes CR8 to the virtual-APIC page",
+        tpr_shadow_probe(cell, space),
+    );
+    check(
+        "TPR threshold exits when the shadow drops below it",
+        tpr_threshold_probe(cell, space),
     );
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
@@ -1302,6 +1310,159 @@ fn cr_access_probe(cell: &mut Vmcs) -> bool {
         error!("vmx: CR-access: {flow:?}");
     }
     drop(stack);
+    ok
+}
+
+/// The byte offset of the task-priority register in the virtual-APIC page,
+/// where `CR8` writes land under the TPR shadow.
+const VTPR_OFFSET: usize = 0x80;
+/// The task-priority class the TPR-shadow guest writes through `CR8`, chosen so
+/// its four bits are recognizable.
+const TPR_VALUE: u8 = 9;
+
+/// A guest that writes a task priority through `CR8` and reads it back.
+///
+/// Under the TPR shadow both accesses go to the virtual-APIC page rather than
+/// the real controller, and neither exits, so the value it reads back is proof
+/// the shadow answered.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_tpr() {
+    core::arch::naked_asm!(
+        "mov rax, {tpr}",
+        "mov cr8, rax",
+        "mov rax, cr8",
+        "mov r8, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        tpr = const TPR_VALUE,
+    );
+}
+
+/// Enables the TPR shadow on the current VMCS, pointing it at the virtual-APIC
+/// page `vapic_pa` with threshold `threshold`.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, already programmed by
+/// [`program_guest`], and `vapic_pa` a page-aligned virtual-APIC page.
+unsafe fn enable_tpr_shadow(cell: &Vmcs, vapic_pa: u64, threshold: u64) -> Result<(), VmFail> {
+    // SAFETY: the caller guarantees the current, programmed VMCS.
+    unsafe {
+        let primary = cell.read(Field::PRIMARY_PROC_CONTROLS)?;
+        cell.write(
+            Field::PRIMARY_PROC_CONTROLS,
+            primary | u64::from(PrimaryProc::USE_TPR_SHADOW.bits()),
+        )?;
+        cell.write(Field::VIRTUAL_APIC_ADDR, vapic_pa)?;
+        cell.write(Field::TPR_THRESHOLD, threshold)
+    }
+}
+
+/// Runs a guest that writes and reads `CR8` under the TPR shadow and checks the
+/// value round-tripped through the virtual-APIC page without exiting.
+fn tpr_shadow_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let vapic = Page::zeroed();
+    let stack = Page::zeroed();
+    let Ok(vapic_pa) = space.translate(VirtAddr::new(core::ptr::from_ref(&vapic.0).addr() as u64))
+    else {
+        error!("vmx: TPR-shadow could not translate the virtual-APIC page");
+        return false;
+    };
+
+    let rip = (guest_tpr as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // runs in the host address space, and the virtual-APIC page is a real,
+    // page-aligned frame.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| enable_tpr_shadow(cell, vapic_pa.as_u64(), 0))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: TPR-shadow programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let vtpr = vapic.0[VTPR_OFFSET];
+    let ok = reached && registers.r8 == u64::from(TPR_VALUE) && vtpr == TPR_VALUE << 4;
+    if !ok {
+        error!(
+            "vmx: TPR-shadow: reached {reached}, read {:#x}, vtpr {vtpr:#x}",
+            registers.r8
+        );
+    }
+    drop((vapic, stack));
+    ok
+}
+
+/// The priority class the threshold guest writes, below the threshold set so
+/// the write triggers the exit.
+const TPR_LOW: u8 = 5;
+/// The threshold the probe sets, above [`TPR_LOW`] and at or below the seeded
+/// class so entry itself does not exit.
+const TPR_THRESHOLD_VALUE: u64 = 8;
+
+/// A guest that lowers `CR8` below the TPR threshold, which exits before the
+/// `VMCALL` is reached.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_tpr_low() {
+    core::arch::naked_asm!(
+        "mov rax, {tpr}",
+        "mov cr8, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        tpr = const TPR_LOW,
+    );
+}
+
+/// Runs a guest that lowers the shadowed `CR8` below the TPR threshold and
+/// checks the processor takes the threshold exit.
+///
+/// The virtual-APIC page is seeded above the threshold so VM entry does not
+/// exit; the guest's write drops the class below it, which is what the exit is
+/// for.
+fn tpr_threshold_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let mut vapic = Page::zeroed();
+    vapic.0[VTPR_OFFSET] = TPR_VALUE << 4;
+    let stack = Page::zeroed();
+    let Ok(vapic_pa) = space.translate(VirtAddr::new(core::ptr::from_ref(&vapic.0).addr() as u64))
+    else {
+        error!("vmx: TPR-threshold could not translate the virtual-APIC page");
+        return false;
+    };
+
+    let rip = (guest_tpr_low as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // runs in the host address space, and the virtual-APIC page is seeded above
+    // the threshold so entry does not fault.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| enable_tpr_shadow(cell, vapic_pa.as_u64(), TPR_THRESHOLD_VALUE))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: TPR-threshold programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    // SAFETY: `cell` is current and fully programmed.
+    let entered = unsafe { run::run(cell, &mut registers) };
+    let ok = entered == Entered::Exited
+        && exit_reason(cell) == Some(BasicExitReason::TPR_BELOW_THRESHOLD);
+    if !ok {
+        error!(
+            "vmx: TPR-threshold: {entered:?}, reason {:?}",
+            exit_reason(cell)
+        );
+    }
+    drop((vapic, stack));
     ok
 }
 
