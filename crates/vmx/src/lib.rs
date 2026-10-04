@@ -45,22 +45,31 @@
 //!   registers that every control word must pass.
 //! - [`exit`] is why a guest stopped, and [`event`] is what is handed to it on
 //!   the way back in.
+//! - [`segment`] is the access-rights word each guest segment is described by.
+//! - [`region`] is the one doubleword software sets in a VMXON region or VMCS.
+//! - [`ept`] is the extended-page-table entry and pointer format, Intel's
+//!   second translation — the counterpart to the `npt` crate's entries.
 
 #![no_std]
 
 pub mod basic;
 pub mod control;
+pub mod ept;
 pub mod event;
 pub mod exit;
 pub mod field;
+pub mod region;
+pub mod segment;
 pub mod support;
 
 pub use crate::{
     basic::VmxBasic,
     control::{Capability, PinBased, PrimaryProc, SecondaryProc, VmEntry, VmExit},
+    ept::{EptAccess, EptEntry, EptMemoryType, EptPointer},
     event::Interruption,
     exit::{BasicExitReason, ExitReason},
     field::{Access, Field, FieldEncoding, Kind, Width},
+    segment::AccessRights,
     support::FeatureControl,
 };
 
