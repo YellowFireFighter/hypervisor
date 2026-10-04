@@ -1939,6 +1939,28 @@ unsafe extern "C" fn guest_apic_read() {
     );
 }
 
+/// Remaps the APIC-access page as a 4-KiB EPT leaf, splitting the identity
+/// large page it falls in.
+///
+/// APIC-access virtualization identifies the page by its guest-physical
+/// address, and does not act on one that is part of a 2-MiB EPT large page, so
+/// the page the APIC-access address names is given its own 4-KiB entry. It
+/// stays identity-mapped; only its granularity changes.
+fn map_apic_access_page(
+    memory: &mut EptMemory,
+    root: u64,
+    access_phys: u64,
+) -> Result<(), ept::EptError> {
+    ept::map(
+        memory,
+        root,
+        access_phys,
+        access_phys,
+        EptAccess::READ | EptAccess::WRITE | EptAccess::EXECUTE,
+        EptMemoryType::WriteBack,
+    )
+}
+
 /// Runs a guest that reads the APIC-access page and checks the processor took
 /// an APIC-access exit, which is what virtualizing those accesses without
 /// register virtualization does.
@@ -1969,6 +1991,10 @@ fn apic_access_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
             return false;
         }
     };
+    if let Err(error) = map_apic_access_page(&mut memory, eptp.root(), access_phys.as_u64()) {
+        error!("vmx: APIC-access could not map the access page finely: {error:?}");
+        return false;
+    }
 
     // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
     // runs behind the identity EPT, so the access page's guest-physical address
@@ -1989,21 +2015,6 @@ fn apic_access_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         error!("vmx: APIC-access programming failed: {error}");
         return false;
     }
-
-    // SAFETY: `cell` is current; these control fields are readable to show what
-    // was actually programmed, which is what the triggering depends on.
-    let (primary, secondary, vapic_field, access_field) = unsafe {
-        (
-            cell.read(Field::PRIMARY_PROC_CONTROLS).unwrap_or(0),
-            cell.read(Field::SECONDARY_PROC_CONTROLS).unwrap_or(0),
-            cell.read(Field::VIRTUAL_APIC_ADDR).unwrap_or(0),
-            cell.read(Field::APIC_ACCESS_ADDR).unwrap_or(0),
-        )
-    };
-    info!(
-        "vmx: APIC-access programmed: primary {primary:#x}, secondary {secondary:#x}, vapic {vapic_field:#x}, access {access_field:#x}, guest-addr {guest_apic_addr:#x}, cap2 {:#x}",
-        probe::read(IA32_VMX_PROCBASED_CTLS2).unwrap_or(0)
-    );
 
     let mut registers = Registers::default();
     registers.rdi = guest_apic_addr;
@@ -2052,6 +2063,10 @@ fn apic_register_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
             return false;
         }
     };
+    if let Err(error) = map_apic_access_page(&mut memory, eptp.root(), access_phys.as_u64()) {
+        error!("vmx: APIC-register could not map the access page finely: {error:?}");
+        return false;
+    }
 
     // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
     // runs behind the identity EPT with a seeded virtual-APIC page, and the
