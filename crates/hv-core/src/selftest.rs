@@ -19,7 +19,10 @@ use ept::{ENTRIES, Memory};
 use log::{error, info, warn};
 use paging::AddressSpace;
 use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
-use vmx::{BasicExitReason, EptEntry, EptPointer, ExitReason, Field, PAGE_BYTES};
+use vmx::{
+    BasicExitReason, EptEntry, EptPointer, ExitReason, Field, Interruption, PAGE_BYTES,
+    event::Kind as EventKind,
+};
 use x86_64::VirtAddr;
 
 /// How many GiB of guest-physical memory the EPT guest identity-maps, which
@@ -140,6 +143,14 @@ pub(crate) fn run(space: &AddressSpace) -> bool {
     check(
         "guest launch, resume across CPUIDs, VMCALL",
         entry_probe(&mut cell),
+    );
+    check(
+        "guest GPRs saved on exit (CPUID results)",
+        register_save_probe(&mut cell),
+    );
+    check(
+        "event injection (#UD delivered and intercepted)",
+        injection_probe(&mut cell),
     );
     // SAFETY: we reached here only by entering VMX operation, so this is a
     // VMX-capable processor and the capability registers exist.
@@ -309,7 +320,7 @@ fn ept_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
 /// EPT table frames for the self-test, allocated from the heap and translated
 /// to the physical addresses the processor walks.
 struct EptMemory<'a> {
-    frames: Vec<(alloc::boxed::Box<Page>, u64)>,
+    frames: Vec<(Box<Page>, u64)>,
     space: &'a AddressSpace,
 }
 
@@ -334,6 +345,94 @@ impl Memory for EptMemory<'_> {
         // is owned here and reached through a unique borrow.
         unsafe { &mut *page.cast::<[EptEntry; ENTRIES]>() }
     }
+}
+
+/// Launches the guest once with its registers cleared and checks the world
+/// switch brought the `CPUID` results back.
+///
+/// With `RAX` zero the guest runs `CPUID` leaf 0, which returns the highest
+/// leaf in `RAX` and the vendor string in `RBX`/`RDX`/`RCX`. Seeing those
+/// non-zero after the exit means the run loop saved the guest's general
+/// registers, not just entered and left.
+fn register_save_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_probe as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is current and VMX operation is live; the guest runs in the
+    // host's address space.
+    if let Err(error) = unsafe { program_guest(cell, None, rip, rsp) } {
+        error!("vmx: register-save programming failed: {error}");
+        drop(stack);
+        return false;
+    }
+    let mut registers = Registers::default();
+    // SAFETY: `cell` is current and programmed.
+    let entered = unsafe { run::run(cell, &mut registers) };
+    let ok = entered == Entered::Exited
+        && exit_reason(cell) == Some(BasicExitReason::CPUID)
+        && registers.rax != 0
+        && registers.rbx != 0;
+    if !ok {
+        error!(
+            "vmx: register-save: {entered:?}, rax {:#x}, rbx {:#x}",
+            registers.rax, registers.rbx
+        );
+    }
+    drop(stack);
+    ok
+}
+
+/// Bit of the exception bitmap and the vector of the invalid-opcode exception,
+/// which carries no error code and needs no instruction length to inject.
+const INVALID_OPCODE_VECTOR: u8 = 6;
+
+/// Injects a `#UD` into the guest and checks it was delivered and intercepted.
+///
+/// The exception bitmap is set to intercept the vector, and the entry
+/// interruption-information field is set to inject it; a correct injection
+/// delivers the exception on entry, which the bitmap turns into an exit whose
+/// interruption-information field names the same vector.
+fn injection_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_probe as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    let event = Interruption::inject(INVALID_OPCODE_VECTOR, EventKind::HardwareException, false);
+    // SAFETY: `cell` is current and VMX operation is live.
+    if let Err(error) = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| cell.write(Field::EXCEPTION_BITMAP, 1_u64 << INVALID_OPCODE_VECTOR))
+            .and_then(|()| cell.write(Field::VM_ENTRY_INTERRUPTION_INFO, u64::from(event.bits())))
+    } {
+        error!("vmx: injection programming failed: {error}");
+        drop(stack);
+        return false;
+    }
+
+    // SAFETY: `cell` is current and programmed.
+    let entered = unsafe { run::run(cell, &mut Registers::default()) };
+    let ok = match entered {
+        Entered::Exited if exit_reason(cell) == Some(BasicExitReason::EXCEPTION_OR_NMI) => {
+            // SAFETY: `cell` is current.
+            let info = unsafe { cell.read(Field::VM_EXIT_INTERRUPTION_INFO) }.unwrap_or(0);
+            let delivered = Interruption::from_bits((info & 0xFFFF_FFFF) as u32);
+            delivered.is_valid() && delivered.vector() == INVALID_OPCODE_VECTOR
+        }
+        Entered::Exited => {
+            error!(
+                "vmx: injected #UD but exited with reason {:?}",
+                exit_reason(cell)
+            );
+            false
+        }
+        Entered::Failed(fail) => {
+            error!("vmx: injection entry rejected ({fail})");
+            false
+        }
+    };
+    drop(stack);
+    ok
 }
 
 /// The basic exit reason the current VMCS records, or `None` if it cannot be
