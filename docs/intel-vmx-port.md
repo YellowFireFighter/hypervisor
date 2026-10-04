@@ -24,18 +24,14 @@ exit/event/segment/region/EPT formats, support), `ept` (tree construction),
 (the control-register and EPT-violation exit-qualification decoders).
 
 Proven in VMX operation on an Intel processor (via VirtualBox nested VT-x),
-all ten self-test checks passing: `VMXON`, `VMCLEAR`/`VMPTRLD`, `VMREAD`/
+all twelve self-test checks passing: `VMXON`, `VMCLEAR`/`VMPTRLD`, `VMREAD`/
 `VMWRITE` at every field width, `VMLAUNCH`, `VMRESUME` (resume across multiple
 exits), guest GPR save/restore, RIP advance past an exiting instruction, a guest
-running behind an EPT second translation, and switching between two VMCS.
-
-Written, host-tested where pure, and awaiting the next hardware run: the
-`vmexits` dispatch loop and the two self-test checks that drive a guest through
-it — one guest that runs `CPUID` and one that runs `RDMSR`, each checked against
-the machine's own answer, which together prove the loop emulates an exit and
-resumes the guest rather than only stepping over the instruction. The executable
-dispatch itself (the `CPUID`/MSR forwarding and RIP advance) runs only in VMX
-operation, so it is unverified until those checks pass on Intel.
+running behind an EPT second translation, switching between two VMCS, and — the
+`vmexits` dispatch loop — a guest driven entirely through `dispatch()`, its
+`CPUID` and `RDMSR` exits emulated and the result checked against the machine's
+own answer, which proves the loop emulates an exit and resumes the guest rather
+than only stepping over the instruction.
 
 ## Running the self-test on Intel hardware
 
