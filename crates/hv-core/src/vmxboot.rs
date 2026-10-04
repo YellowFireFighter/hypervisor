@@ -27,6 +27,15 @@
 //! demands what AMD's world switch does not check: a null task register becomes
 //! a minimal busy 64-bit one, and every loaded code or data segment is marked
 //! accessed.
+//!
+//! Two more keep the stub, which is citrine's code and not firmware's, from
+//! being diverted into firmware's handlers. The stub is entered with interrupts
+//! masked, because an interrupt firmware's timer left pending would otherwise
+//! be delivered through firmware's descriptor table before the stub's first
+//! instruction. And every exception exits to the host instead of being
+//! delivered, so a fault taken running the stub — a page firmware maps
+//! non-executable, say — is reported with its vector, error code and address
+//! rather than vanishing into firmware's exception handler.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -38,11 +47,11 @@ use svm::{SaveArea, Segment, SegmentAttributes};
 use vmcs::{Registers, VmFail, Vmcs, controls, fixed, host, inspect, instr};
 use vmexits::{Exit, Partition, Stop};
 use vmx::{
-    AccessRights, BasicExitReason, EptEntry, Field, FieldEncoding, PAGE_BYTES,
+    AccessRights, BasicExitReason, EptEntry, Field, FieldEncoding, Interruption, PAGE_BYTES,
     check::{self, GuestState, Subject},
     segment::{BUSY_TSS_TYPE, TYPE_ACCESSED},
 };
-use x86_64::VirtAddr;
+use x86_64::{VirtAddr, registers::rflags::RFlags};
 
 /// Bytes in a gibibyte, the unit the EPT identity map is sized in.
 const GIB: u64 = 1 << 30;
@@ -50,6 +59,10 @@ const GIB: u64 = 1 << 30;
 /// The limit of the smallest 64-bit task-state segment, which is what a guest
 /// given a task register of citrine's own is described with.
 const TSS_LIMIT: u32 = 0x67;
+
+/// An exception bitmap with every vector set, so every exception the guest
+/// takes exits instead of being delivered.
+const EVERY_EXCEPTION: u64 = 0xFFFF_FFFF;
 
 /// The four VMCS fields that describe one guest segment: selector, base, limit
 /// and access rights.
@@ -191,6 +204,7 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
     let programmed = unsafe {
         host::program(&cell)
             .and_then(|()| controls::program(&cell, Some(eptp)))
+            .and_then(|()| cell.write(Field::EXCEPTION_BITMAP, EVERY_EXCEPTION))
             .and_then(|()| program_firmware(&cell, &firmware.cpu, entry.as_u64()))
     };
     if let Err(error) = programmed {
@@ -199,9 +213,10 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
         return;
     }
     info!(
-        "vmxboot: VMCS programmed from firmware state; guest cr3 {:#x}, entry {:#x}",
+        "vmxboot: VMCS programmed from firmware state; guest cr3 {:#x}, entry {:#x}, firmware rflags {:#x} (entered with interrupts masked)",
         firmware.cpu.cr3,
-        entry.as_u64()
+        entry.as_u64(),
+        firmware.cpu.rflags
     );
 
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
@@ -252,7 +267,7 @@ unsafe fn program_firmware(cell: &Vmcs, save: &SaveArea, entry: u64) -> Result<(
         cell.write(Field::CR4_READ_SHADOW, cr4)?;
         cell.write(Field::GUEST_IA32_EFER, save.efer)?;
         cell.write(Field::GUEST_DR7, save.dr7)?;
-        cell.write(Field::GUEST_RFLAGS, save.rflags)?;
+        cell.write(Field::GUEST_RFLAGS, quiet(save.rflags))?;
         cell.write(Field::GUEST_RIP, entry)?;
         cell.write(Field::GUEST_RSP, save.rsp)?;
         program_segments(cell, save)?;
@@ -268,6 +283,15 @@ unsafe fn program_firmware(cell: &Vmcs, save: &SaveArea, entry: u64) -> Result<(
         cell.write(Field::GUEST_PENDING_DBG_EXCEPTIONS, 0)?;
     }
     Ok(())
+}
+
+/// Firmware's `RFLAGS` with interrupts masked, for entering the stub.
+///
+/// Firmware runs with interrupts enabled, and its timer keeps raising them
+/// while the host runs with them off, so one is pending at entry. Delivered,
+/// it would run firmware's handler in place of the stub's first instruction.
+fn quiet(rflags: u64) -> u64 {
+    rflags & !RFlags::INTERRUPT_FLAG.bits()
 }
 
 /// Writes all eight guest segments from a captured save area.
@@ -461,6 +485,10 @@ fn reconcile_cr(value: u64, fixed0: u32, fixed1: u32) -> u64 {
 
 /// Logs how the guest entry and its first exits went.
 fn report(cell: &Vmcs, outcome: Exit) {
+    if let Exit::Stopped(_) = outcome {
+        // SAFETY: `cell` is current, in VMX operation.
+        unsafe { locate(cell) };
+    }
     match outcome {
         Exit::Vmcall => info!(
             "vmxboot: the firmware guest reached its VMCALL; VM entry and the world switch carried the firmware state"
@@ -489,8 +517,58 @@ fn report(cell: &Vmcs, outcome: Exit) {
             let gpa = unsafe { cell.read(Field::GUEST_PHYSICAL_ADDRESS) }.unwrap_or(0);
             error!("vmxboot: the firmware guest took an EPT violation at {gpa:#x}: {violation:?}");
         }
+        Exit::Stopped(Stop::Unhandled(BasicExitReason::EXCEPTION_OR_NMI)) => {
+            // SAFETY: `cell` is current, in VMX operation.
+            unsafe { exception(cell) };
+        }
         Exit::Stopped(stop) => error!("vmxboot: the firmware guest stopped: {stop:?}"),
     }
+}
+
+/// Logs where the guest was when it stopped.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+unsafe fn locate(cell: &Vmcs) {
+    // SAFETY: the caller guarantees the current VMCS; these guest-state fields
+    // are readable after any exit.
+    let (rip, rsp, rflags) = unsafe {
+        (
+            cell.read(Field::GUEST_RIP).unwrap_or(0),
+            cell.read(Field::GUEST_RSP).unwrap_or(0),
+            cell.read(Field::GUEST_RFLAGS).unwrap_or(0),
+        )
+    };
+    error!("vmxboot: the guest stopped at rip {rip:#x}, rsp {rsp:#x}, rflags {rflags:#x}");
+}
+
+/// Logs the exception an exception exit intercepted: its vector and kind, its
+/// error code, and the exit qualification, which for a page fault is the
+/// linear address that faulted.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation, and its
+/// last exit an exception or non-maskable interrupt.
+unsafe fn exception(cell: &Vmcs) {
+    // SAFETY: the caller guarantees the current VMCS and an exception exit,
+    // after which these three fields describe the event.
+    let (info, code, qualification) = unsafe {
+        (
+            cell.read(Field::VM_EXIT_INTERRUPTION_INFO).unwrap_or(0),
+            cell.read(Field::VM_EXIT_INTERRUPTION_ERROR_CODE)
+                .unwrap_or(0),
+            cell.read(Field::EXIT_QUALIFICATION).unwrap_or(0),
+        )
+    };
+    let event = Interruption::from_bits(u32::try_from(info).unwrap_or(0));
+    let code = if event.has_error_code() { code } else { 0 };
+    error!(
+        "vmxboot: the guest took exception vector {} ({:?}), error code {code:#x}, qualification {qualification:#x}",
+        event.vector(),
+        event.kind()
+    );
 }
 
 /// Checks the programmed guest state against the VM-entry rules before the
