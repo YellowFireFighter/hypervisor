@@ -47,19 +47,27 @@ shadow virtualizing `CR8` to the virtual-APIC page without an exit, and the TPR
 threshold taking the exit when the shadow drops below it — each with a self-test
 check, unverified until it runs on Intel.
 
-Written, and awaiting its first hardware run: the firmware-guest entry probe
-(the `vmx-boot` feature, in `hv-core`'s `vmxboot` module). On the Intel branch
-of bring-up it enters VMX operation, builds an identity EPT over all of physical
-memory, programs a VMCS from the captured firmware save area — reconciling
-`CR0`/`CR4` against the fixed bits and converting each segment's packed
-attributes to the VMCS access-rights word — and enters that state as a guest at
-a one-instruction stub that calls straight back into the host, reporting whether
-the entry was accepted and how the first exit went. It is the first piece of the
-guest path proper rather than a mechanism check: firmware's captured `RIP` is
-zero (left for the entry to fill), so there is no portal yet and the stub stands
-in for one. Nothing in it has executed; a rejected entry will name the
-VM-instruction-error to work from, and the likely first one is the task register,
-which UEFI need not have loaded.
+The firmware-guest entry probe (the `vmx-boot` feature, in `hv-core`'s
+`vmxboot` module) has had one hardware run. On the Intel branch of bring-up it
+enters VMX operation, builds an identity EPT over all of physical memory,
+programs a VMCS from the captured firmware save area — reconciling `CR0`/`CR4`
+against the fixed bits and converting each segment's packed attributes to the
+VMCS access-rights word — and enters that state as a guest at a one-instruction
+stub that calls straight back into the host. It is the first piece of the guest
+path proper rather than a mechanism check: firmware's captured `RIP` is zero
+(left for the entry to fill), so there is no portal yet and the stub stands in
+for one.
+
+On the first run (an AMI firmware, 19 GiB of RAM) VMX operation, the EPT build
+and the VMCS programming all succeeded, and the entry failed with basic exit
+reason 33, *invalid guest state*. That exit names no specific check, so the
+probe now restates the checks itself (`vmx::check`, fed by
+`vmcs::inspect::guest_state`), logs every rule the programmed state breaks
+before trying the entry, and dumps the guest state raw if the entry still
+fails. Two adjustments were made for the most likely causes, unverified until
+the next run: a null firmware task register becomes a minimal busy 64-bit one
+(VMX requires a usable TSS; AMD's world switch does not check), and every
+loaded code or data segment is marked accessed.
 
 ## Running the self-test on Intel hardware
 
