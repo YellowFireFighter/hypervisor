@@ -38,6 +38,8 @@
 //! - [`enable`] puts a processor into VMX operation, tying those together.
 //! - [`vmcs`] is a VMCS made current, with typed field access and the
 //!   capability reconciliation a control word is written through.
+//! - [`inspect`] reads the guest state back out of a VMCS, with the processor
+//!   limits the VM-entry checks measure it against.
 //!
 //! # What is not here yet
 //!
@@ -59,6 +61,7 @@ pub mod error;
 pub mod fixed;
 pub mod guest;
 pub mod host;
+pub mod inspect;
 pub mod instr;
 mod msr;
 pub mod run;
