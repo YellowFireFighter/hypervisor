@@ -36,8 +36,19 @@ pub enum CoreError {
     /// mechanism in the self-test — is not yet wired into bring-up, so there is
     /// no guest path to take here and the boot stops with this report rather
     /// than faulting on the first SVM instruction.
+    #[cfg(not(feature = "vmx-boot"))]
     #[error("intel processor detected; the VMX guest backend is not yet wired into bring-up")]
     IntelBackendNotWired,
+    /// The VMX firmware-guest probe ran to completion and the build halts
+    /// deliberately: it enters the captured firmware as a VMX guest, reports
+    /// how the entry and first exits went, and stops, because the rest of
+    /// the Intel guest path is not yet built. Like the self-test, it takes
+    /// the halt-and-report path every other variant does.
+    #[cfg(feature = "vmx-boot")]
+    #[error(
+        "vmx firmware-guest probe complete; halting (the Intel guest path is still being built)"
+    )]
+    VmxBootProbeComplete,
     /// The boot protocol the loader passed cannot be used.
     #[error(transparent)]
     Handoff(#[from] HandoffError),

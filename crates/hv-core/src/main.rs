@@ -48,6 +48,8 @@ mod screen;
 #[cfg(feature = "vmx-selftest")]
 mod selftest;
 mod uacpi;
+#[cfg(feature = "vmx-boot")]
+mod vmxboot;
 
 use core::{convert::Infallible, ffi::c_void, hint::black_box, panic::PanicInfo};
 
@@ -204,6 +206,19 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     unsafe { space.drop_lower_half() }?;
     info!("core: dropped the firmware half of the address space");
 
+    // The Intel VMX self-test, when this build is for it: it needs only the
+    // address space, the descriptor tables and the model-specific-register
+    // probe, all established above, so it runs here rather than after the ACPI
+    // and clock bring-up below — neither of which it uses, and both of which do
+    // work that only a real machine's firmware exercises. It halts afterward,
+    // since the guest path below is AMD SVM and cannot run on an Intel machine.
+    // The `if` guards the return on a value the compiler cannot fold away, so
+    // the SVM path below is not flagged unreachable under the feature.
+    #[cfg(feature = "vmx-selftest")]
+    if selftest::run(&space) {
+        return Err(CoreError::VmxSelfTestComplete);
+    }
+
     // Logged on this side of the transition rather than the other, because that
     // is what proves the capture survived it: nothing firmware left is
     // addressable any more, and these numbers come out of the chunk.
@@ -214,22 +229,22 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     start_clock(&mut space, &acpi, handoff)?;
     screen.advance(Step::Clock);
 
-    // The Intel VMX self-test, when this build is for it: run the first piece
-    // of the unverified VMX path on real hardware and halt, since the guest
-    // path below is AMD SVM and cannot run on an Intel machine. The `if` guards
-    // the return on a value the compiler cannot fold away, so the SVM path
-    // below is not flagged unreachable under the feature.
-    #[cfg(feature = "vmx-selftest")]
-    if selftest::run(&space) {
-        return Err(CoreError::VmxSelfTestComplete);
-    }
-
     // The guest path below enables and runs AMD SVM, which an Intel processor
     // does not have. Choose the backend by vendor: AMD proceeds, and Intel stops
     // here with a report, because the VMX backend its mechanisms are proven for
     // is not yet wired into bring-up. This stops a plausible boot of this image
     // on an Intel machine from faulting on the first SVM instruction.
     if processor::vendor() == processor::Vendor::Intel {
+        // With the VMX-boot feature, take the first real step of the Intel guest
+        // path before halting: enter VMX operation and run the captured firmware
+        // as a guest, reporting how far it got. Without it, stop with a report
+        // rather than faulting on the first SVM instruction.
+        #[cfg(feature = "vmx-boot")]
+        {
+            vmxboot::attempt(&space, firmware, handoff.top_of_ram);
+            return Err(CoreError::VmxBootProbeComplete);
+        }
+        #[cfg(not(feature = "vmx-boot"))]
         return Err(CoreError::IntelBackendNotWired);
     }
 

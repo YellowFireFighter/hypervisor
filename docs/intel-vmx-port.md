@@ -47,6 +47,20 @@ shadow virtualizing `CR8` to the virtual-APIC page without an exit, and the TPR
 threshold taking the exit when the shadow drops below it — each with a self-test
 check, unverified until it runs on Intel.
 
+Written, and awaiting its first hardware run: the firmware-guest entry probe
+(the `vmx-boot` feature, in `hv-core`'s `vmxboot` module). On the Intel branch
+of bring-up it enters VMX operation, builds an identity EPT over all of physical
+memory, programs a VMCS from the captured firmware save area — reconciling
+`CR0`/`CR4` against the fixed bits and converting each segment's packed
+attributes to the VMCS access-rights word — and enters that state as a guest at
+a one-instruction stub that calls straight back into the host, reporting whether
+the entry was accepted and how the first exit went. It is the first piece of the
+guest path proper rather than a mechanism check: firmware's captured `RIP` is
+zero (left for the entry to fill), so there is no portal yet and the stub stands
+in for one. Nothing in it has executed; a rejected entry will name the
+VM-instruction-error to work from, and the likely first one is the task register,
+which UEFI need not have loaded.
+
 ## Running the self-test on Intel hardware
 
 1. Build with the on-screen log and the self-test:
@@ -61,9 +75,21 @@ check, unverified until it runs on Intel.
    64-bit, EFI on, Secure Boot off, Nested VT-x/AMD-V on.
 4. For QEMU/KVM: `-enable-kvm -cpu host` boots the raw image with OVMF directly.
 
-The self-test runs early in `hv-core::bring_up` (right after `start_clock`) and
-then halts, because everything below it is SVM and cannot run on Intel. It is a
-genuine capability probe, not a mock.
+The self-test runs early in `hv-core::bring_up`, before the ACPI and clock
+bring-up, and then halts, because everything below it is SVM and cannot run on
+Intel. It is a genuine capability probe, not a mock.
+
+To run the firmware-guest entry probe instead, swap the feature:
+
+```sh
+cargo build -p hv-loader -p hv-core \
+  --features hv-loader/efifb,hv-core/efifb,hv-core/vmx-boot,hv-loader/no-guest
+```
+
+and stage the media the same way. `no-guest` is used because the probe halts
+before any guest boot manager runs, so the loader needs none and must not refuse
+to boot on a machine with several ESPs or none. The probe runs at the vendor
+branch, after the clock bring-up, and halts with its report afterward.
 
 ## What is done, and what remains
 
@@ -88,15 +114,18 @@ Remaining, roughly in order:
    in place: `processor::vendor()` reads the vendor string and `bring_up`
    branches on it, so the image chooses the SVM (`svm`/`vcpu`/`npt`/`exits`) or
    VMX (`vmx`/`vmcs`/`ept`/`vmexits`) backend rather than assuming SVM. Today the
-   AMD branch is the whole guest path and the Intel branch stops with a report
-   (`CoreError::IntelBackendNotWired`) instead of faulting on the first SVM
-   instruction. The run loop driving `vmexits::dispatch` now exists as
-   `vmexits::run`, taking a `Partition` for the guest's memory. What remains is
-   the rest of that path: a partition-equivalent that owns the firmware guest's
-   full EPT and memory, the portal, SMP bring-up, and device interposition —
-   the VMX counterparts of what `partition`/`portal` give the SVM side. Unlike
-   the mechanisms above, finishing it is validated by booting a real guest on an
-   Intel machine, not by the self-test battery.
+   AMD branch is the whole guest path, and the Intel branch either stops with a
+   report (`CoreError::IntelBackendNotWired`) or, under the `vmx-boot` feature,
+   runs the firmware-guest entry probe above and then halts. The run loop driving
+   `vmexits::dispatch` now exists as `vmexits::run`, taking a `Partition` for the
+   guest's memory, and the probe is the first caller to enter a VMCS programmed
+   from real firmware state. What remains is the rest of that path: a
+   partition-equivalent that owns the firmware guest's full EPT and memory, the
+   portal (so the guest resumes into the boot manager rather than a stub), SMP
+   bring-up, and device interposition — the VMX counterparts of what
+   `partition`/`portal` give the SVM side. Unlike the mechanisms above, finishing
+   it is validated by booting a real guest on an Intel machine, not by the
+   self-test battery.
 
 ## Gotchas learned the hard way
 
