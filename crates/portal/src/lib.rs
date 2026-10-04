@@ -508,7 +508,29 @@ unsafe extern "C" {
     static citrine_portal_end: u8;
 }
 
+/// The hypercall instruction the portal notifies the host through: AMD's
+/// `VMMCALL`, or Intel's `VMCALL` under the `vmx` feature. The portal is the
+/// same position-independent blob either way; only this one instruction, and
+/// the extension it belongs to, differ between the two backends.
+#[cfg(not(feature = "vmx"))]
+macro_rules! hypercall_instruction {
+    () => {
+        "vmmcall"
+    };
+}
+#[cfg(feature = "vmx")]
+macro_rules! hypercall_instruction {
+    () => {
+        "vmcall"
+    };
+}
+
 core::arch::global_asm!(
+    concat!(
+        ".macro citrine_hypercall\n",
+        hypercall_instruction!(),
+        "\n.endm"
+    ),
     include_str!("portal.s"),
     SYSTEM_TABLE = const offset_of!(Parameters, system_table),
     GUEST_IMAGE_HANDLE = const offset_of!(Parameters, guest_image_handle),

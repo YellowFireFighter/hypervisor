@@ -12,5 +12,10 @@ thiserror = { workspace = true }
 uefi-raw = { workspace = true }
 x86_64 = { workspace = true }
 
+[features]
+# Emit Intel's VMCALL instead of AMD's VMMCALL as the portal's hypercall, for
+# the VMX backend. The portal blob is otherwise identical.
+vmx = []
+
 [lints]
 workspace = true

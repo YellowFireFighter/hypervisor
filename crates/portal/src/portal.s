@@ -82,7 +82,7 @@ citrine_portal_start:
     // StartImage's own EFI_STATUS, untouched since the call, so the host
     // gets it for free by reading rax alongside this notification.
     mov rdx, {START_RETURNED}
-    vmmcall
+    citrine_hypercall
 
 // Reached only when the guest cannot be handed back safely. There is
 // nothing left to attempt, so the processor is stopped for good; `hlt` is
@@ -123,13 +123,13 @@ citrine_portal_exit_boot_services:
     test rax, rax
     jnz 0f
     mov rdx, {LOADER_UNLOADED}
-    vmmcall
+    citrine_hypercall
     jmp 1f
 0:
     // Deletion is best effort. The host records the EFI status in rax and
     // marks the portal so retries never call UnloadImage a second time.
     mov rdx, {LOADER_SKIPPED}
-    vmmcall
+    citrine_hypercall
 1:
     // UnloadImage follows the firmware ABI and may destroy every volatile
     // register, including r11. Rebuild the portal pointer before reading the
@@ -156,7 +156,7 @@ citrine_portal_exit_boot_services:
     // fail after returning success. The host learns this here rather than by
     // guessing at it from the guest's later behavior.
     mov rdx, {EXIT_SUCCEEDED}
-    vmmcall
+    citrine_hypercall
 2:
     pop r11
     ret
