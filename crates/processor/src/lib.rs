@@ -269,6 +269,46 @@ pub fn identity() -> Identity {
     })
 }
 
+/// Which vendor made this processor, from the vendor string `CPUID` leaf zero
+/// returns.
+///
+/// It is what a hypervisor built for both machines selects a virtualization
+/// backend on: AMD's secure virtual machine or Intel's virtual-machine
+/// extensions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vendor {
+    /// An AMD processor, virtualized through SVM.
+    Amd,
+    /// An Intel processor, virtualized through VMX.
+    Intel,
+    /// A processor of neither vendor, which pulzar does not virtualize.
+    Other,
+}
+
+impl Vendor {
+    /// The vendor a leaf-zero vendor string names.
+    #[must_use]
+    fn classify(vendor_string: &str) -> Self {
+        match vendor_string {
+            "AuthenticAMD" => Self::Amd,
+            "GenuineIntel" => Self::Intel,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// This processor's vendor, from the vendor string in `CPUID` leaf zero.
+///
+/// Unlike the cached queries above this reads `CPUID` each call; it is asked
+/// once at bring-up to choose a backend, not on any hot path, so nothing is
+/// kept.
+#[must_use]
+pub fn vendor() -> Vendor {
+    CpuId::new()
+        .get_vendor_info()
+        .map_or(Vendor::Other, |info| Vendor::classify(info.as_str()))
+}
+
 /// The four registers returned by one raw `CPUID` query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuidResult {
@@ -326,3 +366,15 @@ static PHYSICAL_ADDRESS_BITS: Once<u8> = Once::new();
 
 /// Which processor this image runs on, read on first use.
 static IDENTITY: Once<Identity> = Once::new();
+
+#[cfg(test)]
+mod tests {
+    use super::Vendor;
+
+    #[test]
+    fn vendor_strings_classify() {
+        assert_eq!(Vendor::classify("AuthenticAMD"), Vendor::Amd);
+        assert_eq!(Vendor::classify("GenuineIntel"), Vendor::Intel);
+        assert_eq!(Vendor::classify("KVMKVMKVM\0\0\0"), Vendor::Other);
+    }
+}
