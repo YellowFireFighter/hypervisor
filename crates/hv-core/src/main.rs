@@ -224,6 +224,15 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
         return Err(CoreError::VmxSelfTestComplete);
     }
 
+    // The guest path below enables and runs AMD SVM, which an Intel processor
+    // does not have. Choose the backend by vendor: AMD proceeds, and Intel stops
+    // here with a report, because the VMX backend its mechanisms are proven for
+    // is not yet wired into bring-up. This stops a plausible boot of this image
+    // on an Intel machine from faulting on the first SVM instruction.
+    if processor::vendor() == processor::Vendor::Intel {
+        return Err(CoreError::IntelBackendNotWired);
+    }
+
     // The roster first, because everything below it is sized by how many
     // processors firmware described; then the interrupt controllers, which is
     // where this processor learns what it is called; then a block of its own,
