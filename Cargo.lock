@@ -1439,9 +1439,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vmcs"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "thiserror",
+ "vmx",
+ "x86_64",
+]
+
+[[package]]
 name = "vmx"
 version = "0.1.0"
 dependencies = [
+ "bitfield-struct",
  "bitflags",
 ]
 
