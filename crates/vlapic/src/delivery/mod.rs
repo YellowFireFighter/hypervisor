@@ -174,7 +174,7 @@ pub(crate) fn send(from: &Vlapic, lapics: &[Vlapic], command: Command) {
             }
         }
         // Deliberately not delivered, and this is a limitation of the machine
-        // Pulzar presents rather than an oversight.
+        // Citrine presents rather than an oversight.
         //
         // Forwarding one to the real processor would take the *host* into
         // system-management mode over host state, running firmware's handler

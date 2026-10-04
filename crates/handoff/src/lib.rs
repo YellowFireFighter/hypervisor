@@ -1,4 +1,4 @@
-//! The boot protocol `hv-loader` hands to the pulzar hypervisor image.
+//! The boot protocol `hv-loader` hands to the citrine hypervisor image.
 //!
 //! The loader does not start the hypervisor image the way firmware starts a
 //! UEFI application. It maps the image itself, at a randomized high-half
@@ -124,7 +124,7 @@ pub struct Handoff {
     /// read when the loader asked it — or zero if firmware would not say, or
     /// said something the calendar does not admit.
     ///
-    /// This is the only absolute time pulzar is ever handed. The hypervisor
+    /// This is the only absolute time citrine is ever handed. The hypervisor
     /// runs on after boot services are gone, and nothing left in the machine
     /// then knows what year it is: the counters it keeps time with only count.
     /// So the reading is taken once, while there is still firmware to take it
@@ -148,7 +148,7 @@ pub struct Handoff {
     /// entered with, and everything a virtual interrupt controller has to be
     /// seeded from. It travels here rather than being re-read because there is
     /// nothing left to re-read it from: by the time the hypervisor wants it,
-    /// every register it describes holds pulzar's value instead.
+    /// every register it describes holds citrine's value instead.
     ///
     /// A direct-map address, like [`Handoff::memory_map`], so it survives the
     /// firmware half of the address space being dropped.
@@ -257,11 +257,11 @@ impl Channels {
 }
 
 impl Handoff {
-    /// Identifies a real handoff. `"PULZARH1"`, chosen to be recognizable in a
+    /// Identifies a real handoff. `"CITRINE1"`, chosen to be recognizable in a
     /// hex dump and impossible to confuse with the firmware image handle that
     /// arrives in the same register when the image is launched as a UEFI
     /// application.
-    pub const MAGIC: u64 = u64::from_le_bytes(*b"PULZARH1");
+    pub const MAGIC: u64 = u64::from_le_bytes(*b"CITRINE1");
 
     /// Current protocol version.
     pub const VERSION: u32 = 8;
@@ -320,7 +320,7 @@ impl Handoff {
 pub enum HandoffError {
     /// The magic did not match, so the pointer is not a handoff. Firmware
     /// starting the image as an application lands here.
-    #[error("not a pulzar handoff (magic {magic:#018x})")]
+    #[error("not a citrine handoff (magic {magic:#018x})")]
     NotAHandoff {
         /// What was found where the magic should have been.
         magic: u64,

@@ -1,6 +1,6 @@
 [package]
 name = "snapshot"
-description = "The state firmware was running with, read before pulzar overwrites any of it"
+description = "The state firmware was running with, read before citrine overwrites any of it"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

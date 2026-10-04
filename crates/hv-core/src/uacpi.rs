@@ -16,7 +16,7 @@
 //!
 //! # The two stages, and why there are two
 //!
-//! uACPI can bring itself up in two steps, and pulzar needs both because the
+//! uACPI can bring itself up in two steps, and citrine needs both because the
 //! things it wants out of ACPI are the same things a full uACPI would need to
 //! have already.
 //!
@@ -34,7 +34,7 @@
 //! bring-up, after the clock, the processors, the controllers and the devices,
 //! because interpreting bytecode is what needs all of those.
 //!
-//! # What pulzar deliberately does not let uACPI do
+//! # What citrine deliberately does not let uACPI do
 //!
 //! Own ACPI's hardware. This hypervisor reads the platform; it does not take
 //! the platform over. What boots after it is firmware, and then an operating
@@ -46,9 +46,10 @@
 //! So uACPI is compiled without the subsystems that would do any of that: the
 //! event subsystem, the global lock and the fixed-event machinery are not in
 //! the image. What is left is the interpreter and the namespace, which is
-//! exactly what pulzar wants — the description of a machine, and the values its
-//! bytecode computes. [`interrupts`] carries the whole of that reasoning, and
-//! why the decision is a compile-time one rather than a callback that says no.
+//! exactly what citrine wants — the description of a machine, and the values
+//! its bytecode computes. [`interrupts`] carries the whole of that reasoning,
+//! and why the decision is a compile-time one rather than a callback that says
+//! no.
 //!
 //! ACPI mode is not entered either. [`initialize`] passes the flag that leaves
 //! it alone, so nothing here writes the command register that switches the

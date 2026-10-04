@@ -9,7 +9,7 @@
 //!
 //! # Sharing vectors with something else
 //!
-//! Pulzar passes the platform through. It will arm an APIC timer and send
+//! Citrine passes the platform through. It will arm an APIC timer and send
 //! interprocessor interrupts, and those arrive on the same vectors as
 //! everything else that was already using the machine. Two things follow. Every
 //! vector needs an entry point, because any of them may turn out to carry

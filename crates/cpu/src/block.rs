@@ -28,7 +28,7 @@
 //!
 //! Because nothing swaps yet. `swapgs` exists to exchange this base with a
 //! shadow across a boundary where the other side owns `GS` — a ring 3 entry, or
-//! a guest exit. Nothing in pulzar crosses such a boundary, so there is one
+//! a guest exit. Nothing in citrine crosses such a boundary, so there is one
 //! base and it is the live one. Entering a guest is what will introduce the
 //! shadow, and it will introduce it because it needs it.
 //!

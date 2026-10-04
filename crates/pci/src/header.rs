@@ -522,7 +522,7 @@ pub enum Layout {
     Bridge,
     /// A bridge onto a `CardBus` socket. Recognized so that its registers are
     /// left alone: what it keeps where an endpoint keeps its base address
-    /// registers is a socket base, and no machine pulzar runs on has one.
+    /// registers is a socket base, and no machine citrine runs on has one.
     CardBus,
     /// A shape the specification does not define, which nothing here can read
     /// past the common sixteen bytes.

@@ -15,7 +15,7 @@ use crate::{paths, proc};
 /// `target/`, and destination path inside the ESP.
 const IMAGES: [(&str, &str, &str); 2] = [
     ("hv-loader", "hv-loader.efi", "EFI/BOOT/BOOTX64.EFI"),
-    ("hv-core", "hv-core.efi", "pulzar.efi"),
+    ("hv-core", "hv-core.efi", "citrine.efi"),
 ];
 
 /// The boot manager the loader starts as the first guest.

@@ -10,7 +10,7 @@
 //! each block with two bytes and a version.
 //!
 //! Both are walked here into a [`Capabilities`], which holds where each block
-//! pulzar understands was found and nothing else. Named fields rather than a
+//! citrine understands was found and nothing else. Named fields rather than a
 //! collection, so that the result is a fixed-size value a function record can
 //! own outright — the intercept path that eventually reads these cannot
 //! allocate, and a list of pairs would have to.
@@ -34,7 +34,7 @@ use log::warn;
 
 use crate::{Offset, PciError, access::Config, header::Layout};
 
-/// Where each capability pulzar understands was found on one function.
+/// Where each capability citrine understands was found on one function.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     power_management: Option<Offset>,

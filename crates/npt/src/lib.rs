@@ -7,7 +7,7 @@
 //! guest makes to its own mapping — and it is what lets a guest be given a view
 //! of physical memory that is not the machine's.
 //!
-//! Here that view is almost the machine's own. Pulzar passes the hardware
+//! Here that view is almost the machine's own. Citrine passes the hardware
 //! through, so a guest physical address maps to the identical system physical
 //! address, and these tables exist to say two things: *yes, identically* for
 //! everything the machine has, and *no* for the regions that are not the
@@ -74,7 +74,7 @@
 //!
 //! # What the guest sees instead of the hypervisor
 //!
-//! Every guest physical page of the reserved chunk — pulzar's image, its heap,
+//! Every guest physical page of the reserved chunk — citrine's image, its heap,
 //! its stacks, its descriptor tables, its control blocks and these tables
 //! themselves — is mapped to one shared frame of zeroes, read-only. A guest
 //! reading there sees zeroes rather than either the hypervisor or a fault,

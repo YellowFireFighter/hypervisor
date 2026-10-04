@@ -5,7 +5,7 @@ cargo-features = ["per-package-target"]
 
 [package]
 name = "hv-core"
-description = "Hypervisor image for pulzar, loaded and entered by hv-loader"
+description = "Hypervisor image for citrine, loaded and entered by hv-loader"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -26,6 +26,9 @@ descriptors = { workspace = true }
 emulate = { workspace = true }
 exits = { workspace = true }
 handoff = { workspace = true }
+# The guest-to-hypervisor call interface, used by the self-test to prove a
+# guest VMMCALL decodes and is answered; pulled in only with that feature.
+hypercall = { workspace = true, optional = true }
 ipi = { workspace = true }
 log = { workspace = true }
 npt = { workspace = true }
@@ -48,6 +51,12 @@ thiserror = { workspace = true }
 uacpi-sys = { workspace = true }
 uefi-raw = { workspace = true }
 vcpu = { workspace = true }
+# The Intel VMX definitions and the executable VMX layer, pulled in only by
+# the vmx-selftest feature below.
+vmx = { workspace = true, optional = true }
+vmcs = { workspace = true, optional = true }
+ept = { workspace = true, optional = true }
+vmexits = { workspace = true, optional = true }
 vlapic = { workspace = true }
 x86_64 = { workspace = true }
 
@@ -73,6 +82,13 @@ efifb = ["serial/efifb"]
 # onto the frame buffer while the host comes up and held until the bar fills.
 # Draws on the same pixels as `efifb`, so the two cannot be built together.
 splash = []
+
+# A one-shot check, on an Intel processor, that this build can enter VMX
+# operation and that the VMCS instruction wrappers round-trip. Runs early in
+# bring-up and then halts, because the rest of citrine is AMD SVM and cannot
+# proceed on an Intel machine. For bringing the unverified Intel path up on
+# real hardware; off in every ordinary build.
+vmx-selftest = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits", "dep:hypercall"]
 
 [lints]
 workspace = true

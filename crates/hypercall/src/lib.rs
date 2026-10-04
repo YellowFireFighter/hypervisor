@@ -1,4 +1,4 @@
-//! The call a guest makes into the pulzar hypervisor, and what comes back.
+//! The call a guest makes into the citrine hypervisor, and what comes back.
 //!
 //! One instruction, `VMMCALL`, which the hypervisor intercepts. The
 //! architecture puts no privilege restriction on it at all: a guest executes it
@@ -37,7 +37,7 @@
 //!
 //! # What this crate is not
 //!
-//! It has no dependency on any other part of pulzar, and it must not grow one.
+//! It has no dependency on any other part of citrine, and it must not grow one.
 //! Both ends need it: the hypervisor's exit path, which is `no_std` firmware
 //! code, and a tool inside the guest, which is an ordinary hosted program. A
 //! crate that reached into the hypervisor would drag the whole of it into the
@@ -68,7 +68,7 @@ pub use crate::{
 /// portal's own notifications are: `VMMCALL` has other users inside the same
 /// guest, and a command word that could be arrived at by accident is one whose
 /// arrival would be answered as a hypercall.
-pub const SELECTOR: u32 = u32::from_be_bytes(*b"PULZ");
+pub const SELECTOR: u32 = u32::from_be_bytes(*b"CITR");
 
 /// The version of this interface both sides must agree on.
 ///

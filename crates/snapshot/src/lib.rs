@@ -1,12 +1,12 @@
-//! The state firmware was running with, read before pulzar overwrites any of
+//! The state firmware was running with, read before citrine overwrites any of
 //! it.
 //!
-//! Pulzar hands the machine on rather than keeping it. After bring-up it means
+//! Citrine hands the machine on rather than keeping it. After bring-up it means
 //! to enter a guest that *is* the firmware environment as it was found, and go
 //! on booting whatever firmware would have booted. Describing that guest to the
 //! processor takes the registers firmware was using — and every one of them is
-//! a register pulzar overwrites on its way up: the extended feature register to
-//! enable no-execute, the page-attribute table to fix what cache selection
+//! a register citrine overwrites on its way up: the extended feature register
+//! to enable no-execute, the page-attribute table to fix what cache selection
 //! means, the descriptor tables to own its own interrupts, the local
 //! controller's timer to own its own clock. Not one can be read back
 //! afterwards.
@@ -37,24 +37,24 @@
 //! because firmware's values are not the ones a guest wants:
 //!
 //! - `rip` and `rax`, which would point inside this capture. The guest starts
-//!   on a stub of pulzar's own, so whoever enters it fills these in.
+//!   on a stub of citrine's own, so whoever enters it fills these in.
 //! - the virtualization-enable bit of `efer`, which the processor requires set
 //!   to enter a guest at all and which firmware naturally does not have set.
 //!   The field holds firmware's register exactly; adding that bit belongs to
 //!   the entry.
 //!
 //! `rsp` is *not* among them. The guest goes on using the UEFI stack rather
-//! than one of pulzar's, so firmware's stack pointer is captured like
+//! than one of citrine's, so firmware's stack pointer is captured like
 //! everything else.
 //!
 //! Nor are the fields the processor only swaps when a feature is switched on
 //! elsewhere — the branch records, the speculation control, the performance
-//! counters, the sampling block, the shadow-stack registers. Pulzar writes none
-//! of the underlying registers, so firmware's values are still in the hardware,
-//! and a control area that leaves those features off never reads these fields.
-//! The page-attribute table is the exception and the reason it is captured: the
-//! address-space subsystem does overwrite it, and the processor does load it
-//! under nested paging.
+//! counters, the sampling block, the shadow-stack registers. Citrine writes
+//! none of the underlying registers, so firmware's values are still in the
+//! hardware, and a control area that leaves those features off never reads
+//! these fields. The page-attribute table is the exception and the reason it is
+//! captured: the address-space subsystem does overwrite it, and the processor
+//! does load it under nested paging.
 
 #![no_std]
 
@@ -99,7 +99,7 @@ pub struct FirmwareContext {
 /// tables are read through the bases the processor's own registers name, and
 /// the local controller's register page through the window.
 ///
-/// Nothing checks that this is called before pulzar has modified anything —
+/// Nothing checks that this is called before citrine has modified anything —
 /// that is the caller's to arrange, and it is the whole value of the result.
 #[must_use]
 pub unsafe fn capture(window: DirectMap) -> FirmwareContext {

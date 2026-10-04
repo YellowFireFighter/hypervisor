@@ -5,7 +5,7 @@ cargo-features = ["per-package-target"]
 
 [package]
 name = "hv-loader"
-description = "First-stage UEFI loader for the pulzar hypervisor"
+description = "First-stage UEFI loader for the citrine hypervisor"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -56,6 +56,12 @@ splash = []
 # Starts Limine as the first guest's boot manager instead of Windows', for the
 # Linux disks the demonstrations run.
 limine = []
+
+# Preloads no guest boot manager: the loader's own image stands in for one that
+# is never started. For the VMX self-test, which halts before any guest runs,
+# so it needs no boot manager and must not refuse to boot on a machine that has
+# several or none.
+no-guest = []
 
 [lints]
 workspace = true

@@ -9,7 +9,7 @@
 //! be returned from, over state that was perfectly fine.
 //!
 //! Remapping them somewhere harmless is the other answer and is the wrong one
-//! here. Pulzar passes the platform through; it does not own the legacy
+//! here. Citrine passes the platform through; it does not own the legacy
 //! controllers and does not want their interrupts. Masking every input leaves
 //! them configured as firmware left them and simply stops them asserting, which
 //! is the smallest thing that makes unmasking safe.
@@ -24,9 +24,9 @@
 //! A machine old enough to have these may also have an interrupt mode
 //! configuration register, which is how the pre-ACPI world moved the interrupt
 //! line running straight from the 8259 to the boot processor over to the APICs.
-//! Pulzar does not write it. It is a change to how the platform is wired rather
-//! than to what this hypervisor does with it, and it buys nothing here: every
-//! input is masked, so nothing asserts down either path, and the local
+//! Citrine does not write it. It is a change to how the platform is wired
+//! rather than to what this hypervisor does with it, and it buys nothing here:
+//! every input is masked, so nothing asserts down either path, and the local
 //! controller's first pin — the other end of that wiring — is masked too unless
 //! firmware described it as a non-maskable interrupt.
 

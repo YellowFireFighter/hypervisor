@@ -57,7 +57,7 @@ use crate::{
 /// decodes nothing and its register briefly describes a range it does not
 /// answer in; doing that to a device another driver is using can lose that
 /// driver a transaction, and doing it to one that is bus-mastering can lose a
-/// transfer already in flight. Pulzar leaves the firmware environment running,
+/// transfer already in flight. Citrine leaves the firmware environment running,
 /// so that condition is not met for any device until the guest's own
 /// `ExitBootServices` has been intercepted.
 pub unsafe fn size(function: &Function, slot: usize) -> Result<Option<u64>, PciError> {

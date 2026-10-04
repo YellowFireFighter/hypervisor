@@ -77,8 +77,8 @@ pub use crate::{
 /// not be run.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum VcpuError {
-    /// The processor has no virtualization extension. Every machine pulzar runs
-    /// on must have one.
+    /// The processor has no virtualization extension. Every machine citrine
+    /// runs on must have one.
     #[error("this processor has no virtualization extension")]
     NoSvm,
     /// Firmware disabled the extension on a processor with no key mechanism, so

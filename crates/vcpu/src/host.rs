@@ -28,7 +28,7 @@
 //! and the task register is what an interrupt taken on a switched stack needs —
 //! so every exit must reload them.
 //!
-//! It need not re-save them. On a pulzar processor none of that state changes
+//! It need not re-save them. On a citrine processor none of that state changes
 //! after the processor has installed its descriptor tables and attached:
 //! nothing executes `swapgs`, nothing reloads the task register or the local
 //! descriptor table, and nothing writes a fast-system-call register. So

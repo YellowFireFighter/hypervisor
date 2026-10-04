@@ -283,7 +283,7 @@ pub struct InterruptState {
     pub interrupt_shadow: bool,
     /// The guest's `RFLAGS.IF`, written back to the VMCB on `#VMEXIT`.
     ///
-    /// Meaningful for the encrypted-virtualization extension pulzar does not
+    /// Meaningful for the encrypted-virtualization extension citrine does not
     /// implement, where the guest's register state is not readable out of the
     /// save area and this is the only place the flag can be seen.
     pub guest_interrupt_mask: bool,

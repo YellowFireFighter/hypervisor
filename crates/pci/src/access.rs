@@ -427,7 +427,7 @@ fn transact<T>(address: Address, offset: Offset, action: impl FnOnce() -> T) -> 
         let mut port = Port::<u32>::new(ADDRESS_PORT);
         // SAFETY: the selector port accepts any 32-bit value; writing it only
         // decides which register the data port then refers to, and has no effect
-        // on any device. Pulzar runs at ring zero, where port access is allowed.
+        // on any device. Citrine runs at ring zero, where port access is allowed.
         unsafe { port.write(selector) };
         action()
     })

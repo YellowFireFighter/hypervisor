@@ -1,4 +1,4 @@
-//! The pulzar hypervisor image.
+//! The citrine hypervisor image.
 //!
 //! Firmware never starts this image. `hv-loader` maps it at a randomized
 //! high-half address and jumps to its entry point with a [`Handoff`] in the
@@ -29,7 +29,7 @@
 //! zeroes to the guest for the whole of its life, and this one page is either
 //! that frame or nothing at all.
 //!
-//! The same entry point is also reachable by starting `pulzar.efi` as an
+//! The same entry point is also reachable by starting `citrine.efi` as an
 //! ordinary UEFI application, in which case the first argument is a firmware
 //! image handle rather than a handoff. That case is detected and refused, never
 //! guessed at.
@@ -45,6 +45,8 @@ mod avic;
 mod error;
 mod heap;
 mod screen;
+#[cfg(feature = "vmx-selftest")]
+mod selftest;
 mod uacpi;
 
 use core::{convert::Infallible, ffi::c_void, hint::black_box, panic::PanicInfo};
@@ -118,7 +120,7 @@ extern "efiapi" fn efi_main(argument: *const c_void) -> Status {
     // A machine with no output is one nothing can be reported from, not one that
     // must not boot: `log` discards every record while no logger is installed
     // and `emergency` writes nowhere, so what follows runs silently and
-    // correctly. Refusing to start instead meant the machines pulzar would not
+    // correctly. Refusing to start instead meant the machines citrine would not
     // run on were exactly the ones with no serial header — which is most of
     // them.
     let _ = serial::init();
@@ -131,7 +133,7 @@ extern "efiapi" fn efi_main(argument: *const c_void) -> Status {
         Err(error @ HandoffError::NotAHandoff { .. }) => {
             info!("core: {error}");
             error!(
-                "core: pulzar.efi is the hypervisor image; boot hv-loader (BOOTX64.EFI) instead"
+                "core: citrine.efi is the hypervisor image; boot hv-loader (BOOTX64.EFI) instead"
             );
             return Status::UNSUPPORTED;
         }
@@ -211,6 +213,25 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     let acpi = survey_machine(handoff, &space)?;
     start_clock(&mut space, &acpi, handoff)?;
     screen.advance(Step::Clock);
+
+    // The Intel VMX self-test, when this build is for it: run the first piece
+    // of the unverified VMX path on real hardware and halt, since the guest
+    // path below is AMD SVM and cannot run on an Intel machine. The `if` guards
+    // the return on a value the compiler cannot fold away, so the SVM path
+    // below is not flagged unreachable under the feature.
+    #[cfg(feature = "vmx-selftest")]
+    if selftest::run(&space) {
+        return Err(CoreError::VmxSelfTestComplete);
+    }
+
+    // The guest path below enables and runs AMD SVM, which an Intel processor
+    // does not have. Choose the backend by vendor: AMD proceeds, and Intel stops
+    // here with a report, because the VMX backend its mechanisms are proven for
+    // is not yet wired into bring-up. This stops a plausible boot of this image
+    // on an Intel machine from faulting on the first SVM instruction.
+    if processor::vendor() == processor::Vendor::Intel {
+        return Err(CoreError::IntelBackendNotWired);
+    }
 
     // The roster first, because everything below it is sized by how many
     // processors firmware described; then the interrupt controllers, which is
@@ -349,7 +370,7 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     // bytecode computes, and nothing the hypervisor needs to run a guest comes
     // from there — the processors, the interrupt routing, the apertures and the
     // counters were all read from the tables during the survey. So a machine whose
-    // definition blocks do not load is one pulzar knows the shape of but not the
+    // definition blocks do not load is one citrine knows the shape of but not the
     // behaviour of, and that is worth a record rather than a refusal to boot.
     if let Err(status) = uacpi::initialize() {
         error!("core: uacpi could not build the machine's namespace: {status}");
@@ -641,7 +662,7 @@ fn seed(vcpu: &mut Vcpu, firmware: &FirmwareContext, entry: PhysAddr) {
 ///
 /// It comes after the firmware tables because it is built out of them — where
 /// the event timer is, and what its fallback would be — and after the lower
-/// half is gone because the counter is reached through a mapping of pulzar's
+/// half is gone because the counter is reached through a mapping of citrine's
 /// own, like everything else from here on.
 ///
 /// The wall-clock reading in the boot protocol is what the clock counts forward
@@ -694,7 +715,7 @@ fn start_clock(
 /// # Errors
 ///
 /// [`CoreError::Uacpi`] if firmware published no root pointer or its table
-/// directory cannot be read, or [`CoreError::Acpi`] if a table pulzar parses
+/// directory cannot be read, or [`CoreError::Acpi`] if a table citrine parses
 /// does not hold what it should — or if the machine has no MADT, without which
 /// its other processors could never be started.
 fn survey_machine(handoff: &Handoff, space: &AddressSpace) -> Result<Acpi, CoreError> {
@@ -819,7 +840,7 @@ fn self_check(space: &mut AddressSpace, handoff: &Handoff) -> Result<(), CoreErr
 /// them is whether returning resolves anything.
 ///
 /// An external interrupt is something the machine was already doing before
-/// pulzar existed — firmware's timer is the one that arrives first — and
+/// citrine existed — firmware's timer is the one that arrives first — and
 /// returning from it drops it, which is the whole of what can be done with an
 /// interrupt that has no owner yet. It is still reported: an unexpected vector
 /// is the hypervisor learning something about the machine it is on.
@@ -924,7 +945,7 @@ fn host_apic_mode(firmware: &FirmwareContext) -> apic::Mode {
 ///
 /// The loader captured it before it had modified anything and left it beside
 /// the boot protocol, because by now there is nowhere else it could come from:
-/// the registers it describes hold pulzar's values, and firmware's own copies
+/// the registers it describes hold citrine's values, and firmware's own copies
 /// of what it does not hold are in memory that is no longer addressable.
 ///
 /// # Errors

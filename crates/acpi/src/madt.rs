@@ -9,7 +9,7 @@
 //!
 //! Only the structures an x86 hypervisor acts on are modelled. The SAPIC
 //! entries belong to Itanium, the GIC entries to ARM, and the remainder
-//! describe controllers that do not exist on a machine pulzar can run on; they
+//! describe controllers that do not exist on a machine citrine can run on; they
 //! are counted and skipped rather than being silently invisible.
 //!
 //! Two kinds of processor entry exist and both are kept in one list. The
@@ -210,7 +210,7 @@ impl Madt {
         }
         if self.ignored > 0 {
             info!(
-                "{who}: madt held {} structures of types pulzar does not model",
+                "{who}: madt held {} structures of types citrine does not model",
                 self.ignored
             );
         }

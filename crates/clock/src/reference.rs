@@ -133,9 +133,9 @@ impl Borrowed {
     /// The mapping is deliberately never released and an event timer this clock
     /// started is deliberately never stopped: from here the counter *is* the
     /// hypervisor's timebase, so the address it is read through has to stay
-    /// valid and the ticks have to keep coming for as long as pulzar runs. This
-    /// is the one path a counter may outlive its borrow by, and it is sound
-    /// exactly because it is the path that never unmaps.
+    /// valid and the ticks have to keep coming for as long as citrine runs.
+    /// This is the one path a counter may outlive its borrow by, and it is
+    /// sound exactly because it is the path that never unmaps.
     pub(crate) fn keep(self) -> Counter {
         self.counter
     }

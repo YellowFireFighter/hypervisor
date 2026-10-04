@@ -4,8 +4,8 @@
 //! Both are done once, before the guest owns the timer, and the order is
 //! forced. Calibration uses the physical timer and leaves it stopped, so
 //! measuring after the guest had programmed something would destroy an
-//! appointment it had already made — and pulzar does not boot a fresh guest, so
-//! there is very often such an appointment to keep.
+//! appointment it had already made — and citrine does not boot a fresh guest,
+//! so there is very often such an appointment to keep.
 
 use apic::{Divisor, LocalState};
 use clock::{Frequency, Kind};

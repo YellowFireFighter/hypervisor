@@ -503,9 +503,9 @@ fn boot_services_table_size(header: Header) -> Result<usize, PortalError> {
 }
 
 unsafe extern "C" {
-    static pulzar_portal_start: u8;
-    static pulzar_portal_data: u8;
-    static pulzar_portal_end: u8;
+    static citrine_portal_start: u8;
+    static citrine_portal_data: u8;
+    static citrine_portal_end: u8;
 }
 
 core::arch::global_asm!(
@@ -536,8 +536,8 @@ const fn as_u64(value: usize) -> u64 {
 
 /// The bytes copied into the portal reservation.
 fn blob() -> &'static [u8] {
-    let start = &raw const pulzar_portal_start;
-    let end = &raw const pulzar_portal_end;
+    let start = &raw const citrine_portal_start;
+    let end = &raw const citrine_portal_end;
     let bytes = end as usize - start as usize;
     // SAFETY: both symbols delimit one contiguous assembly section, ordered by
     // the assembler; no Rust reference aliases its destination until copied.
@@ -546,8 +546,8 @@ fn blob() -> &'static [u8] {
 
 /// Offset of the parameter symbol from the entry symbol.
 fn data_offset() -> usize {
-    let start = &raw const pulzar_portal_start;
-    let data = &raw const pulzar_portal_data;
+    let start = &raw const citrine_portal_start;
+    let data = &raw const citrine_portal_data;
     data as usize - start as usize
 }
 

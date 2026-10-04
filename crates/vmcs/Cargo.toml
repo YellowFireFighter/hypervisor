@@ -1,0 +1,15 @@
+[package]
+name = "vmcs"
+description = "Entering VMX operation and driving a VMCS, the Intel counterpart to vcpu"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+log = { workspace = true }
+thiserror = { workspace = true }
+vmx = { workspace = true }
+x86_64 = { workspace = true }
+
+[lints]
+workspace = true

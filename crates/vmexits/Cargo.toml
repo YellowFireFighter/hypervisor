@@ -1,0 +1,19 @@
+[package]
+name = "vmexits"
+description = "What a guest's VMX exits mean, the Intel counterpart to exits"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+log = { workspace = true }
+# The processor's own CPUID, run on the guest's behalf when it exits on one.
+processor = { workspace = true }
+# A model-specific register reached with a refusal caught rather than taken, so
+# a guest that names a register the machine lacks does not fault the host.
+probe = { workspace = true }
+vmcs = { workspace = true }
+vmx = { workspace = true }
+
+[lints]
+workspace = true

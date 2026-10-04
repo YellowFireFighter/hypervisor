@@ -24,7 +24,7 @@
 //!
 //! # The extension that is not modelled here
 //!
-//! Several fields belong to encrypted virtualization, which pulzar does not
+//! Several fields belong to encrypted virtualization, which citrine does not
 //! implement. They are present as plain values because the layout is not the
 //! architecture's layout without them, and leaving a hole would put every
 //! field after it at the wrong offset. They are documented as what they are
@@ -124,7 +124,7 @@ pub struct ControlArea {
     /// when the hardware drives them on its behalf.
     pub avic_apic_bar: u64,
     /// Guest physical address of the communication block used by the
-    /// encrypted-virtualization extension, which pulzar does not implement.
+    /// encrypted-virtualization extension, which citrine does not implement.
     pub ghcb_gpa: u64,
     /// An exception or interrupt to deliver to the guest before its first
     /// instruction, bypassing every intercept check.
@@ -162,13 +162,13 @@ pub struct ControlArea {
     pub avic_physical_table: AvicPhysicalTable,
     reserved_0x100: [u8; 8],
     /// Physical address of the encrypted state area, part of an extension
-    /// pulzar does not implement.
+    /// citrine does not implement.
     pub vmsa_pointer: u64,
     /// Accumulator value handed across an encrypted guest's explicit exit, part
-    /// of an extension pulzar does not implement.
+    /// of an extension citrine does not implement.
     pub vmgexit_rax: u64,
     /// Privilege level of an encrypted guest's explicit exit, part of an
-    /// extension pulzar does not implement.
+    /// extension citrine does not implement.
     pub vmgexit_cpl: u8,
     reserved_0x119: [u8; 7],
     /// How many bus locks the guest may take before the intercept fires. The
@@ -176,18 +176,18 @@ pub struct ControlArea {
     pub bus_lock_threshold: u16,
     reserved_0x122: [u8; 0x12],
     /// Whether the processor should merge requested interrupts into an
-    /// encrypted guest's own pending set, part of an extension pulzar does not
+    /// encrypted guest's own pending set, part of an extension citrine does not
     /// implement.
     pub update_irr: u32,
     /// Which features an encrypted guest is permitted, part of an extension
-    /// pulzar does not implement.
+    /// citrine does not implement.
     pub allowed_sev_features: u64,
     /// Which features an encrypted guest is running with, part of an extension
-    /// pulzar does not implement.
+    /// citrine does not implement.
     pub guest_sev_features: u64,
     reserved_0x148: [u8; 8],
     /// Interrupts to merge into an encrypted guest's pending set, part of an
-    /// extension pulzar does not implement.
+    /// extension citrine does not implement.
     pub requested_irr: [u32; 8],
     reserved_0x170: [u8; 0x270],
     /// Bytes at the end of the control area the processor will never use, left
@@ -431,11 +431,11 @@ pub struct NestedPagingControl {
     /// Translate the guest's physical addresses through a second set of page
     /// tables rooted at this block's nested table root.
     pub enabled: bool,
-    /// Encrypt the guest's memory, part of an extension pulzar does not
+    /// Encrypt the guest's memory, part of an extension citrine does not
     /// implement.
     pub encrypted_memory: bool,
-    /// Encrypt the guest's register state too, part of an extension pulzar does
-    /// not implement.
+    /// Encrypt the guest's register state too, part of an extension citrine
+    /// does not implement.
     pub encrypted_state: bool,
     /// Trap a guest that executes from a page its own tables call user memory,
     /// which lets a hypervisor tell the two kinds of execution apart.
@@ -445,7 +445,7 @@ pub struct NestedPagingControl {
     /// translation enabled.
     pub supervisor_shadow_stack_check: bool,
     /// Encrypt every guest access whatever the guest's own tables say, part of
-    /// an extension pulzar does not implement.
+    /// an extension citrine does not implement.
     pub transparent_encryption: bool,
     /// Treat the guest's own page tables as read-only, so that the processor
     /// does not write access and dirty bits into them.

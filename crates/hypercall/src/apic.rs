@@ -186,10 +186,10 @@ pub struct Header {
 }
 
 impl Header {
-    /// Identifies a written dump. `"PULZAPIC"`, chosen to be legible in a hex
+    /// Identifies a written dump. `"CITRAPIC"`, chosen to be legible in a hex
     /// dump of a buffer whose other possible contents are whatever the guest
     /// had there.
-    pub const MAGIC: u64 = u64::from_le_bytes(*b"PULZAPIC");
+    pub const MAGIC: u64 = u64::from_le_bytes(*b"CITRAPIC");
 
     /// The header for a dump of this processor, naming the sections that were
     /// filled in.

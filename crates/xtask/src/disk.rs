@@ -121,7 +121,7 @@ pub fn linux(force: bool) -> Result<()> {
 ///
 /// Interactive and once. It is a desktop image with no unattended installation
 /// mode, so there is a person at the installer either way — and running it on
-/// bare firmware rather than behind pulzar is deliberate: an installation is
+/// bare firmware rather than behind citrine is deliberate: an installation is
 /// what every later comparison is made against, so it must not have been made
 /// through the thing being tested.
 pub fn cachyos(force: bool) -> Result<()> {

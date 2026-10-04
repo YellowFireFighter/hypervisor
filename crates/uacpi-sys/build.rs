@@ -46,13 +46,13 @@ const OVERRIDE_ARCH_HELPERS: &str = "UACPI_OVERRIDE_ARCH_HELPERS";
 /// Strips the parts of uACPI that own ACPI's hardware.
 ///
 /// The interpreter and the namespace stay; the event subsystem, the global lock
-/// and the fixed-event machinery go. That is not a reduction in what pulzar
-/// reads out of a machine — it is a statement of what pulzar is. A pass-through
-/// hypervisor hands the platform on to firmware and then to an operating
-/// system, and that operating system enters ACPI mode, enables the general
-/// purpose events it wants, takes the global lock and services the system
-/// control interrupt. Two owners of a shared, level-triggered line is a lost
-/// interrupt, not a configuration.
+/// and the fixed-event machinery go. That is not a reduction in what citrine
+/// reads out of a machine — it is a statement of what citrine is. A
+/// pass-through hypervisor hands the platform on to firmware and then to an
+/// operating system, and that operating system enters ACPI mode, enables the
+/// general purpose events it wants, takes the global lock and services the
+/// system control interrupt. Two owners of a shared, level-triggered line is a
+/// lost interrupt, not a configuration.
 ///
 /// Compiling those parts out rather than declining them at run time is what
 /// makes the decision checkable: without this, bringing the namespace up asks

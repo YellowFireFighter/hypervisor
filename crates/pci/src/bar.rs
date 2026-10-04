@@ -16,7 +16,7 @@
 //! in, and what stays set says which bits the device decodes. That write makes
 //! the register decode somewhere else for as long as it lasts, which is not
 //! something to do to a device that firmware is still driving — and firmware is
-//! still driving them, because pulzar leaves the boot environment running. So
+//! still driving them, because citrine leaves the boot environment running. So
 //! the survey reads, and a [`Bar`] carries a base and no extent. Sizing is
 //! [`crate::size`], which the caller invokes deliberately once the devices are
 //! its own.
@@ -50,7 +50,7 @@ pub enum Bar {
     /// The two are indistinguishable without writing to it: an unimplemented
     /// register reads as zero and so does an unassigned one. On a machine whose
     /// firmware has already configured its devices — which is every machine
-    /// pulzar runs on — this mostly means unimplemented.
+    /// citrine runs on — this mostly means unimplemented.
     Unset,
     /// The function answers I/O accesses in this range.
     Port {

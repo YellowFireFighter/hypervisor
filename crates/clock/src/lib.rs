@@ -28,7 +28,7 @@
 //! main counter: a 32-bit one wraps every few minutes, and something has to
 //! read it more often than that for a difference to mean anything. A machine
 //! with neither an invariant timestamp counter nor a 64-bit event timer has no
-//! timebase pulzar can build, and is refused rather than run with a clock that
+//! timebase citrine can build, and is refused rather than run with a clock that
 //! is quietly wrong.
 //!
 //! The power management timer is never a timebase, only ever a reference, for
@@ -59,7 +59,7 @@
 //! timestamp counter is invariant in rate rather than in origin: the
 //! architecture promises that every core counts at the same speed, not that
 //! they all started from the same value. Firmware synchronizes them on the
-//! machines pulzar runs on, and no processor can confirm that on its own.
+//! machines citrine runs on, and no processor can confirm that on its own.
 //!
 //! So the arithmetic is arranged to fail small rather than spectacularly. A
 //! processor whose counter started from a different value than the installing
@@ -328,7 +328,7 @@ pub enum ClockError {
     /// timer, so there is nothing of known rate to measure against.
     #[error("the machine describes no counter of known rate")]
     NoReference,
-    /// Firmware put a timer's register somewhere pulzar cannot reach it.
+    /// Firmware put a timer's register somewhere citrine cannot reach it.
     #[error("a timer register in {space} cannot be reached")]
     UnreachableRegister {
         /// Where firmware said it was.

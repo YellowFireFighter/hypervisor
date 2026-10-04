@@ -16,7 +16,7 @@
 //!
 //! # Nothing here writes to a device
 //!
-//! Pulzar never calls `ExitBootServices`. The firmware environment is left
+//! Citrine never calls `ExitBootServices`. The firmware environment is left
 //! running, which means firmware's own drivers may still be driving the
 //! console, a keyboard and a network interface while this crate runs. A survey
 //! that wrote to a device — even to read a register's size back, which is the

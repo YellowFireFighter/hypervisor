@@ -1,5 +1,5 @@
-//! Geometry of the one physical region pulzar owns, and the fixed layout of the
-//! bookkeeping at its front.
+//! Geometry of the one physical region citrine owns, and the fixed layout of
+//! the bookkeeping at its front.
 //!
 //! Firmware hands the loader a single reserved region and that is all the
 //! physical memory the hypervisor may touch as its own: everything else belongs

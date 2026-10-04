@@ -1,5 +1,5 @@
 //! Reads the interrupt controllers of the processor it runs on out of the
-//! pulzar hypervisor underneath it, and prints them.
+//! citrine hypervisor underneath it, and prints them.
 //!
 //! There is no driver and no privileged step. The hypervisor answers the
 //! hypercall at any privilege level, so this is an ordinary process: it hands
@@ -14,7 +14,7 @@
 //! anywhere else, the instruction the call is made with is not intercepted by
 //! anything: the processor raises an invalid-opcode exception, and the
 //! operating system ends this process with whatever it delivers for one. That
-//! cannot be guarded against from inside — pulzar deliberately answers `CPUID`
+//! cannot be guarded against from inside — citrine deliberately answers `CPUID`
 //! as though no hypervisor were there, so there is no feature bit to ask first
 //! — and it is why this is a tool run on purpose rather than something a
 //! program does in passing.
@@ -47,7 +47,7 @@ fn main() -> ExitCode {
         Answer::Unknown(word) => {
             eprintln!(
                 "apic-dump: something intercepted the call and answered {word:#018x}, which is not \
-                 a status this interface defines — this is probably not a pulzar guest"
+                 a status this interface defines — this is probably not a citrine guest"
             );
             return ExitCode::from(FOREIGN);
         }
@@ -133,7 +133,7 @@ fn report(dump: &ApicDump) {
 
 /// What the dump is of, and which of its sections hold anything.
 fn heading(header: &Header) {
-    println!("pulzar apic dump");
+    println!("citrine apic dump");
     row(
         "processor",
         &format!("{} of {}", header.cpu_index, header.processors),

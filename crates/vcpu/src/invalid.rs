@@ -236,7 +236,7 @@ pub enum Invalid {
     /// are the ones that hold in every mode and on every processor, and the
     /// architecture has rules that do not. Reporting this rather than nothing
     /// is what says the block was examined and came back clean.
-    #[error("the processor refused a control block that breaks no rule pulzar checks")]
+    #[error("the processor refused a control block that breaks no rule citrine checks")]
     Unexplained,
 }
 

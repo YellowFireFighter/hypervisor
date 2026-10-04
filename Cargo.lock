@@ -425,6 +425,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ept"
+version = "0.1.0"
+dependencies = [
+ "vmx",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -567,8 +574,10 @@ dependencies = [
  "cpu",
  "descriptors",
  "emulate",
+ "ept",
  "exits",
  "handoff",
+ "hypercall",
  "ipi",
  "log",
  "npt",
@@ -589,6 +598,9 @@ dependencies = [
  "uefi-raw",
  "vcpu",
  "vlapic",
+ "vmcs",
+ "vmexits",
+ "vmx",
  "x86_64",
 ]
 
@@ -1436,6 +1448,35 @@ dependencies = [
  "thiserror",
  "vcpu",
  "x86_64",
+]
+
+[[package]]
+name = "vmcs"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "thiserror",
+ "vmx",
+ "x86_64",
+]
+
+[[package]]
+name = "vmexits"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "probe",
+ "processor",
+ "vmcs",
+ "vmx",
+]
+
+[[package]]
+name = "vmx"
+version = "0.1.0"
+dependencies = [
+ "bitfield-struct",
+ "bitflags",
 ]
 
 [[package]]

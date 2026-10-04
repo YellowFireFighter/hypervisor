@@ -6,7 +6,7 @@
 //! firmware has to say is where that block is. So this parse ends at the
 //! address, and what the timer does is a question for whoever maps it.
 //!
-//! Pulzar reads it because the HPET is the one counter on a PC whose frequency
+//! Citrine reads it because the HPET is the one counter on a PC whose frequency
 //! is knowable without measuring it against something else. Everything else
 //! either has to be calibrated first, like the timestamp counter, or is too
 //! narrow to keep time in, like the power management timer — so this table is

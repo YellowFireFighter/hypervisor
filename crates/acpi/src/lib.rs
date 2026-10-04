@@ -1,4 +1,4 @@
-//! The firmware description tables pulzar depends on, read once and kept.
+//! The firmware description tables citrine depends on, read once and kept.
 //!
 //! ACPI is the only thing that says how many processors a machine has, how its
 //! interrupts are routed, and where PCI Express configuration space is mapped.
@@ -49,8 +49,8 @@
 //! that does not divide evenly into entries is honoured for the entries it does
 //! cover. The difference is deliberate: a corrupt structure cannot be read
 //! safely, but a machine whose firmware is merely sloppy is still a machine
-//! pulzar should run on, and the sloppiness belongs in the log rather than in a
-//! refusal to boot.
+//! citrine should run on, and the sloppiness belongs in the log rather than in
+//! a refusal to boot.
 //!
 //! # What must already be true
 //!
@@ -174,7 +174,7 @@ impl Acpi {
     /// The first high precision event timer, if the machine has one.
     ///
     /// The first, because a machine with several describes each in a table of
-    /// its own and nothing pulzar does needs more than one counter.
+    /// its own and nothing citrine does needs more than one counter.
     #[must_use]
     pub const fn hpet(&self) -> Option<&Hpet> {
         self.hpet.as_ref()
@@ -183,7 +183,7 @@ impl Acpi {
     /// What was kept of the fixed hardware description, if the machine has one.
     ///
     /// Every machine does in practice — the FADT is how ACPI describes the
-    /// platform's own registers — but nothing pulzar needs from it is worth
+    /// platform's own registers — but nothing citrine needs from it is worth
     /// refusing a machine over, so its absence is reported rather than fatal.
     #[must_use]
     pub const fn fadt(&self) -> Option<&Fadt> {
@@ -247,8 +247,8 @@ pub enum AcpiError {
         /// How many bytes the field needs.
         wanted: usize,
     },
-    /// A table pulzar cannot do without is absent.
-    #[error("the machine has no {signature} table, which pulzar requires")]
+    /// A table citrine cannot do without is absent.
+    #[error("the machine has no {signature} table, which citrine requires")]
     MissingTable {
         /// The signature that was looked for.
         signature: Signature,
@@ -268,7 +268,7 @@ pub enum AcpiError {
 ///
 /// A table that cannot be described is dropped with a warning rather than
 /// failing the whole directory: one unreadable table is not a reason to refuse
-/// a machine, and a table pulzar actually needs going missing this way is
+/// a machine, and a table citrine actually needs going missing this way is
 /// reported by its own absence. uACPI has already refused anything whose header
 /// or checksum did not hold, so what is dropped here is a table it accepted and
 /// this crate could not read a header out of — which should be nothing.

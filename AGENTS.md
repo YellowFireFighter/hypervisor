@@ -1,10 +1,10 @@
-# AGENTS.md — pulzar
+# AGENTS.md — citrine
 
 Operating manual for AI agents working in this repository. Read it fully before
 writing or changing any code. Every rule below is binding unless the user
 explicitly overrides it in the current conversation.
 
-Pulzar is a type-1 hypervisor booted via UEFI. It has two parts: a UEFI loader
+Citrine is a type-1 hypervisor booted via UEFI. It has two parts: a UEFI loader
 application (`hv-loader`) and the hypervisor image proper, which the loader
 maps and transfers control to. This file is not a project summary — it defines
 how you must behave and what the code must look like.
@@ -42,7 +42,7 @@ how you must behave and what the code must look like.
 ## 2. Workspace shape
 
 ```
-pulzar/
+citrine/
 ├── AGENTS.md            ← this file (CLAUDE.md is a symlink to it)
 ├── Cargo.toml           ← workspace root; lints and shared deps live HERE
 ├── rust-toolchain.toml  ← pinned nightly; do not float the channel
@@ -76,6 +76,10 @@ pulzar/
   libraries themselves are target-agnostic `no_std` crates that plain
   `cargo build` compiles for the host too — which is what lets
   `cargo test -p <crate>` run natively. `xtask` builds for the host as well.
+- An Intel VMX backend is being built alongside the AMD SVM one, in the `vmx`,
+  `ept` and `vmcs` crates, with a feature-gated self-test in `hv-core`. Its
+  status, how to run it on Intel hardware, and the work that remains are in
+  `docs/intel-vmx-port.md` — read it before continuing that work.
 
 ## 3. Toolchain and build
 

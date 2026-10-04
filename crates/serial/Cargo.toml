@@ -1,6 +1,6 @@
 [package]
 name = "serial"
-description = "Logging backends for the firmware-side pulzar binaries: debugcon, 16550 UART, UEFI frame buffer"
+description = "Logging backends for the firmware-side citrine binaries: debugcon, 16550 UART, UEFI frame buffer"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

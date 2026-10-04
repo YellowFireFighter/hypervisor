@@ -1,13 +1,13 @@
-//! First-stage UEFI loader for the pulzar hypervisor.
+//! First-stage UEFI loader for the citrine hypervisor.
 //!
 //! Firmware starts this image; it ends by jumping into the hypervisor image
-//! with an address space of pulzar's own making. In between it does six
+//! with an address space of citrine's own making. In between it does six
 //! things, in this order and for these reasons:
 //!
 //! 1. Captures the state firmware was running with, before anything else at
 //!    all. Every register in it is one the steps below overwrite, and none can
 //!    be read back afterwards.
-//! 2. Reserves the one chunk of physical memory pulzar will own. It has to
+//! 2. Reserves the one chunk of physical memory citrine will own. It has to
 //!    happen before the memory map is captured, so the chunk appears in the map
 //!    as reserved rather than as memory something might hand out again.
 //! 3. Loads the guest image without starting it, retaining the resulting image
@@ -131,7 +131,7 @@ const _: () = assert!(
 /// observable — it is the one step whose error is a bare status, since there is
 /// nowhere to report a serial failure to. The capture is ahead of even that
 /// because bringing a serial port up reprograms one, and a snapshot of firmware
-/// taken after pulzar has changed something is a snapshot of pulzar.
+/// taken after citrine has changed something is a snapshot of citrine.
 #[entry]
 fn main() -> Status {
     // SAFETY: firmware's address space is the active one — nothing has run that
@@ -152,7 +152,7 @@ fn main() -> Status {
     let screen = firmware::framebuffer();
     serial::offer_screen(&screen, screen.base);
     show_splash(&screen);
-    info!("loader: pulzar hv-loader starting");
+    info!("loader: citrine hv-loader starting");
     if screen.usable() {
         info!(
             "loader: console frame buffer at {:#x}, {}x{}, logging attached",
@@ -261,7 +261,7 @@ fn boot(
     // reserved for this image alone, which firmware's still-active address space
     // maps identically and which the survey describes as memory; the runs come
     // from firmware's own map and describe RAM rather than device apertures; and
-    // nothing of pulzar's has been mapped or established on this processor yet.
+    // nothing of citrine's has been mapped or established on this processor yet.
     let mut space = unsafe { AddressSpace::build(chunk_base, &survey.ram, placement) }?;
     let hypervisor = load(&mut space, &mut file, &image, placement)?;
 

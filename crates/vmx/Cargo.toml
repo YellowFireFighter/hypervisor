@@ -1,0 +1,13 @@
+[package]
+name = "vmx"
+description = "Intel VMX structures and encodings, exactly as the architecture lays them out"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bitfield-struct = { workspace = true }
+bitflags = { workspace = true }
+
+[lints]
+workspace = true

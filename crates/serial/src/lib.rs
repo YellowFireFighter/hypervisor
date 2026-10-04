@@ -1,4 +1,4 @@
-//! Logging for the firmware-side pulzar binaries, over whichever output the
+//! Logging for the firmware-side citrine binaries, over whichever output the
 //! machine has.
 //!
 //! [`init`] picks a backend, installs a [`log`] logger that writes
