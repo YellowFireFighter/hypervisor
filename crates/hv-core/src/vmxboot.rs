@@ -621,6 +621,12 @@ fn report(cell: &Vmcs, outcome: Exit) {
             // SAFETY: `cell` is current, in VMX operation.
             unsafe { exception(cell) };
         }
+        Exit::Stopped(Stop::Unhandled(BasicExitReason::INIT_SIGNAL)) => error!(
+            "vmxboot: the firmware guest took an INIT signal: an INIT inter-processor interrupt reached this processor, which is how a processor is reset. The guest drove the real local APIC through the identity EPT, so the interrupt controller is not virtualized and the platform resets rather than citrine handling it; a virtual local APIC is what this needs."
+        ),
+        Exit::Stopped(Stop::Unhandled(BasicExitReason::STARTUP_IPI)) => error!(
+            "vmxboot: the firmware guest took a start-up IPI: the guest drove the real local APIC through the identity EPT to start a processor, which the host does not yet virtualize."
+        ),
         Exit::Stopped(stop) => error!("vmxboot: the firmware guest stopped: {stop:?}"),
     }
 }
