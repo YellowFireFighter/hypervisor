@@ -21,8 +21,9 @@ use paging::AddressSpace;
 use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
 use vmexits::{Flow, Stop};
 use vmx::{
-    BasicExitReason, EptAccess, EptEntry, EptMemoryType, EptPointer, ExitReason, Field,
-    Interruption, PAGE_BYTES, PrimaryProc, VmxBasic, event::Kind,
+    BasicExitReason, Capability, EptAccess, EptEntry, EptMemoryType, EptPointer, ExitReason, Field,
+    Interruption, PAGE_BYTES, PinBased, PrimaryProc, SecondaryProc, VmExit, VmxBasic,
+    control::IA32_VMX_PROCBASED_CTLS2, event::Kind,
 };
 use x86_64::{
     VirtAddr,
@@ -226,7 +227,40 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
         tpr_threshold_probe(cell, space),
     );
 
+    apicv_checks(cell, space, &mut check);
+
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
+}
+
+/// Runs the APIC-virtualization checks, each gated on the processor offering
+/// that secondary control — a machine (such as some nested hypervisors) that
+/// lacks one skips its check rather than failing it.
+fn apicv_checks(cell: &mut Vmcs, space: &AddressSpace, check: &mut impl FnMut(&str, bool)) {
+    let caps = secondary_cap();
+    if caps.allows(SecondaryProc::VIRTUALIZE_APIC_ACCESSES.bits()) {
+        check(
+            "access to the APIC-access page exits",
+            apic_access_probe(cell, space),
+        );
+    } else {
+        warn!("vmx: APIC-access virtualization unavailable; skipping its check");
+    }
+    if caps.allows(SecondaryProc::APIC_REGISTER_VIRTUALIZATION.bits()) {
+        check(
+            "APIC register read virtualized from the virtual-APIC page",
+            apic_register_probe(cell, space),
+        );
+    } else {
+        warn!("vmx: APIC-register virtualization unavailable; skipping its check");
+    }
+    if caps.allows(SecondaryProc::VIRTUAL_INTERRUPT_DELIVERY.bits()) {
+        check(
+            "virtual interrupt delivered without an exit",
+            vid_probe(cell, space),
+        );
+    } else {
+        warn!("vmx: virtual-interrupt delivery unavailable; skipping its check");
+    }
 }
 
 /// A guest that exits three times: two `CPUID`s, each an unconditional VM exit,
@@ -1341,13 +1375,13 @@ unsafe extern "C" fn guest_tpr() {
 }
 
 /// Enables the TPR shadow on the current VMCS, pointing it at the virtual-APIC
-/// page `vapic_pa` with threshold `threshold`.
+/// page `vapic_phys` with threshold `threshold`.
 ///
 /// # Safety
 ///
 /// `cell` must be the current VMCS on this processor, already programmed by
-/// [`program_guest`], and `vapic_pa` a page-aligned virtual-APIC page.
-unsafe fn enable_tpr_shadow(cell: &Vmcs, vapic_pa: u64, threshold: u64) -> Result<(), VmFail> {
+/// [`program_guest`], and `vapic_phys` a page-aligned virtual-APIC page.
+unsafe fn enable_tpr_shadow(cell: &Vmcs, vapic_phys: u64, threshold: u64) -> Result<(), VmFail> {
     // SAFETY: the caller guarantees the current, programmed VMCS.
     unsafe {
         let primary = cell.read(Field::PRIMARY_PROC_CONTROLS)?;
@@ -1355,7 +1389,7 @@ unsafe fn enable_tpr_shadow(cell: &Vmcs, vapic_pa: u64, threshold: u64) -> Resul
             Field::PRIMARY_PROC_CONTROLS,
             primary | u64::from(PrimaryProc::USE_TPR_SHADOW.bits()),
         )?;
-        cell.write(Field::VIRTUAL_APIC_ADDR, vapic_pa)?;
+        cell.write(Field::VIRTUAL_APIC_ADDR, vapic_phys)?;
         cell.write(Field::TPR_THRESHOLD, threshold)
     }
 }
@@ -1365,7 +1399,8 @@ unsafe fn enable_tpr_shadow(cell: &Vmcs, vapic_pa: u64, threshold: u64) -> Resul
 fn tpr_shadow_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
     let vapic = Page::zeroed();
     let stack = Page::zeroed();
-    let Ok(vapic_pa) = space.translate(VirtAddr::new(core::ptr::from_ref(&vapic.0).addr() as u64))
+    let Ok(vapic_phys) =
+        space.translate(VirtAddr::new(core::ptr::from_ref(&vapic.0).addr() as u64))
     else {
         error!("vmx: TPR-shadow could not translate the virtual-APIC page");
         return false;
@@ -1378,7 +1413,7 @@ fn tpr_shadow_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
     // page-aligned frame.
     let programmed = unsafe {
         program_guest(cell, None, rip, rsp)
-            .and_then(|()| enable_tpr_shadow(cell, vapic_pa.as_u64(), 0))
+            .and_then(|()| enable_tpr_shadow(cell, vapic_phys.as_u64(), 0))
     };
     if let Err(error) = programmed {
         error!("vmx: TPR-shadow programming failed: {error}");
@@ -1431,7 +1466,8 @@ fn tpr_threshold_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
     let mut vapic = Page::zeroed();
     vapic.0[VTPR_OFFSET] = TPR_VALUE << 4;
     let stack = Page::zeroed();
-    let Ok(vapic_pa) = space.translate(VirtAddr::new(core::ptr::from_ref(&vapic.0).addr() as u64))
+    let Ok(vapic_phys) =
+        space.translate(VirtAddr::new(core::ptr::from_ref(&vapic.0).addr() as u64))
     else {
         error!("vmx: TPR-threshold could not translate the virtual-APIC page");
         return false;
@@ -1444,7 +1480,7 @@ fn tpr_threshold_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
     // the threshold so entry does not fault.
     let programmed = unsafe {
         program_guest(cell, None, rip, rsp)
-            .and_then(|()| enable_tpr_shadow(cell, vapic_pa.as_u64(), TPR_THRESHOLD_VALUE))
+            .and_then(|()| enable_tpr_shadow(cell, vapic_phys.as_u64(), TPR_THRESHOLD_VALUE))
     };
     if let Err(error) = programmed {
         error!("vmx: TPR-threshold programming failed: {error}");
@@ -1463,6 +1499,262 @@ fn tpr_threshold_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         );
     }
     drop((vapic, stack));
+    ok
+}
+
+/// This processor's secondary processor-based control capabilities, read
+/// through [`probe`] so a machine without the register answers as all-forbidden
+/// rather than faulting.
+fn secondary_cap() -> Capability {
+    Capability::from_bits(probe::read(IA32_VMX_PROCBASED_CTLS2).unwrap_or(0))
+}
+
+/// Enables the TPR shadow and the secondary controls `secondary_bits` on the
+/// current VMCS, pointing the TPR shadow at `vapic_phys`.
+///
+/// The secondary word is reconciled against this processor's capability, so a
+/// bit it forbids is dropped; the caller gates on [`secondary_cap`] first when
+/// a particular control is required.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, already programmed by
+/// [`program_guest`], and `vapic_phys` a page-aligned virtual-APIC page.
+unsafe fn enable_apicv(cell: &Vmcs, vapic_phys: u64, secondary_bits: u32) -> Result<(), VmFail> {
+    // SAFETY: the caller guarantees the current, programmed VMCS.
+    unsafe {
+        let primary = cell.read(Field::PRIMARY_PROC_CONTROLS)?;
+        cell.write(
+            Field::PRIMARY_PROC_CONTROLS,
+            primary
+                | u64::from(
+                    PrimaryProc::USE_TPR_SHADOW.bits()
+                        | PrimaryProc::ACTIVATE_SECONDARY_CONTROLS.bits(),
+                ),
+        )?;
+        let reconciled = secondary_cap().reconcile(secondary_bits);
+        cell.write(Field::SECONDARY_PROC_CONTROLS, u64::from(reconciled))?;
+        cell.write(Field::VIRTUAL_APIC_ADDR, vapic_phys)?;
+        cell.write(Field::TPR_THRESHOLD, 0)
+    }
+}
+
+/// The APIC register offset the APIC-access probes read: the version register,
+/// which APIC-register virtualization answers from the virtual-APIC page.
+const APIC_VERSION_OFFSET: usize = 0x30;
+/// The value the register-virtualization probe seeds there, read back without
+/// an exit when the control is on.
+const APIC_REG_MARKER: u32 = 0x00AB_CDEF;
+
+/// A guest that reads an APIC register through the address in `RDI` and
+/// `VMCALL`s — the host sets `RDI` to the APIC-access page.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_apic_read() {
+    core::arch::naked_asm!(
+        "mov eax, [rdi + {off}]",
+        "mov r8, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        off = const APIC_VERSION_OFFSET,
+    );
+}
+
+/// Runs a guest that reads the APIC-access page and checks the processor took
+/// an APIC-access exit, which is what virtualizing those accesses without
+/// register virtualization does.
+fn apic_access_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let vapic = Page::zeroed();
+    let access = Page::zeroed();
+    let stack = Page::zeroed();
+    let at = |page: &Page| VirtAddr::new(core::ptr::from_ref(&page.0).addr() as u64);
+    let (Ok(vapic_phys), Ok(access_phys)) =
+        (space.translate(at(&vapic)), space.translate(at(&access)))
+    else {
+        error!("vmx: APIC-access could not translate its pages");
+        return false;
+    };
+    let guest_apic_addr = at(&access).as_u64();
+
+    let rip = (guest_apic_read as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // runs in the host address space, and the access page is a real frame named
+    // by the APIC-access address.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| {
+                enable_apicv(
+                    cell,
+                    vapic_phys.as_u64(),
+                    SecondaryProc::VIRTUALIZE_APIC_ACCESSES.bits(),
+                )
+            })
+            .and_then(|()| cell.write(Field::APIC_ACCESS_ADDR, access_phys.as_u64()))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: APIC-access programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    registers.rdi = guest_apic_addr;
+    // SAFETY: `cell` is current and fully programmed.
+    let entered = unsafe { run::run(cell, &mut registers) };
+    let ok = entered == Entered::Exited && exit_reason(cell) == Some(BasicExitReason::APIC_ACCESS);
+    if !ok {
+        error!(
+            "vmx: APIC-access: {entered:?}, reason {:?}",
+            exit_reason(cell)
+        );
+    }
+    drop((vapic, access, stack));
+    ok
+}
+
+/// Runs a guest that reads a virtualized APIC register and checks it read the
+/// value the host seeded in the virtual-APIC page, without an exit.
+fn apic_register_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let mut vapic = Page::zeroed();
+    let access = Page::zeroed();
+    let stack = Page::zeroed();
+    vapic.0[APIC_VERSION_OFFSET..APIC_VERSION_OFFSET + 4]
+        .copy_from_slice(&APIC_REG_MARKER.to_le_bytes());
+    let at = |page: &Page| VirtAddr::new(core::ptr::from_ref(&page.0).addr() as u64);
+    let (Ok(vapic_phys), Ok(access_phys)) =
+        (space.translate(at(&vapic)), space.translate(at(&access)))
+    else {
+        error!("vmx: APIC-register could not translate its pages");
+        return false;
+    };
+    let guest_apic_addr = at(&access).as_u64();
+
+    let rip = (guest_apic_read as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // runs in the host address space with a seeded virtual-APIC page and the
+    // access page named by the APIC-access address.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| {
+                enable_apicv(
+                    cell,
+                    vapic_phys.as_u64(),
+                    SecondaryProc::VIRTUALIZE_APIC_ACCESSES.bits()
+                        | SecondaryProc::APIC_REGISTER_VIRTUALIZATION.bits(),
+                )
+            })
+            .and_then(|()| cell.write(Field::APIC_ACCESS_ADDR, access_phys.as_u64()))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: APIC-register programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    registers.rdi = guest_apic_addr;
+    let reached = drive_dispatch(cell, &mut registers);
+    let ok = reached && registers.r8 == u64::from(APIC_REG_MARKER);
+    if !ok {
+        error!(
+            "vmx: APIC-register: reached {reached}, read {:#x}",
+            registers.r8
+        );
+    }
+    drop((vapic, access, stack));
+    ok
+}
+
+/// The vector the virtual-interrupt-delivery probe makes pending.
+const VID_VECTOR: u8 = 0x50;
+/// `RFLAGS` with the interrupt flag and the reserved bit set, so the guest can
+/// take the delivered interrupt.
+const RFLAGS_IF: u64 = 0x202;
+
+/// Seeds the virtual-APIC page's interrupt-request register for `vector`, the
+/// bit the processor reads to find a pending virtual interrupt.
+fn set_virr(vapic: &mut Page, vector: u8) {
+    // The 256 request bits are eight 32-bit registers 16 bytes apart from
+    // offset 0x200; the bit for a vector is bit `vector % 32` of register
+    // `vector / 32`.
+    let register = usize::from(vector / 32);
+    let bit = u32::from(vector % 32);
+    let offset = 0x200 + register * 0x10 + (bit / 8) as usize;
+    vapic.0[offset] |= 1 << (bit % 8);
+}
+
+/// Runs a guest with a pending virtual interrupt and checks the processor
+/// delivered it to the guest's IDT handler without an exit.
+///
+/// The virtual-APIC page has the request bit set and the task priority left at
+/// zero, the guest interrupt status names the vector as requested, and the
+/// guest enters with interrupts enabled and an IDT whose gate for the vector
+/// points at the marker handler — so virtual-interrupt delivery vectors
+/// straight to it.
+fn vid_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let mut vapic = Page::zeroed();
+    let mut idt = Page::zeroed();
+    let stack = Page::zeroed();
+    set_virr(&mut vapic, VID_VECTOR);
+    write_gate(
+        &mut idt,
+        VID_VECTOR,
+        (inject_handler as *const ()).addr() as u64,
+        CS::get_reg().0,
+    );
+    let at = |page: &Page| VirtAddr::new(core::ptr::from_ref(&page.0).addr() as u64);
+    let Ok(vapic_phys) = space.translate(at(&vapic)) else {
+        error!("vmx: VID could not translate the virtual-APIC page");
+        return false;
+    };
+    let idt_base = at(&idt).as_u64();
+
+    let rip = (guest_idle as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // runs in the host address space, its IDT and handler are host-mapped, and
+    // the virtual-APIC page carries the pending request.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| {
+                enable_apicv(
+                    cell,
+                    vapic_phys.as_u64(),
+                    SecondaryProc::VIRTUAL_INTERRUPT_DELIVERY.bits(),
+                )
+            })
+            .and_then(|()| {
+                let pin = cell.read(Field::PIN_BASED_CONTROLS)?;
+                cell.write(
+                    Field::PIN_BASED_CONTROLS,
+                    pin | u64::from(PinBased::EXTERNAL_INTERRUPT_EXITING.bits()),
+                )
+            })
+            .and_then(|()| {
+                let exit = cell.read(Field::PRIMARY_VM_EXIT_CONTROLS)?;
+                cell.write(
+                    Field::PRIMARY_VM_EXIT_CONTROLS,
+                    exit | u64::from(VmExit::ACKNOWLEDGE_INTERRUPT_ON_EXIT.bits()),
+                )
+            })
+            .and_then(|()| cell.write(Field::GUEST_INTERRUPT_STATUS, u64::from(VID_VECTOR)))
+            .and_then(|()| cell.write(Field::GUEST_IDTR_BASE, idt_base))
+            .and_then(|()| cell.write(Field::GUEST_IDTR_LIMIT, 0xFFF))
+            .and_then(|()| cell.write(Field::GUEST_RFLAGS, RFLAGS_IF))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: VID programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let ok = reached && registers.r8 == INJECT_MARKER;
+    if !ok {
+        error!("vmx: VID: reached {reached}, marker {:#x}", registers.r8);
+    }
+    drop((vapic, idt, stack));
     ok
 }
 
