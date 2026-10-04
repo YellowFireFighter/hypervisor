@@ -20,8 +20,14 @@ use log::{error, info, warn};
 use paging::AddressSpace;
 use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
 use vmexits::Flow;
-use vmx::{BasicExitReason, EptEntry, EptPointer, ExitReason, Field, PAGE_BYTES, VmxBasic};
-use x86_64::VirtAddr;
+use vmx::{
+    BasicExitReason, EptAccess, EptEntry, EptMemoryType, EptPointer, ExitReason, Field,
+    Interruption, PAGE_BYTES, VmxBasic, event::Kind,
+};
+use x86_64::{
+    VirtAddr,
+    registers::segmentation::{CS, Segment},
+};
 
 /// How many GiB of guest-physical memory the EPT guest identity-maps, which
 /// must cover every host-physical address its code, stack and page tables fall
@@ -164,8 +170,12 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
             "guest launch under EPT (second translation)",
             ept_probe(cell, space),
         );
+        check(
+            "guest runs in its own address space behind a non-identity EPT",
+            own_address_space_probe(cell, space),
+        );
     } else {
-        warn!("vmx: EPT not available on this processor; skipping the EPT guest check");
+        warn!("vmx: EPT not available on this processor; skipping the EPT guest checks");
     }
     check(
         "second VMCS switch and independence",
@@ -190,6 +200,14 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
     check(
         "IA32_FEATURE_CONTROL answered as firmware-locked",
         feature_control_probe(cell),
+    );
+    check(
+        "event injected through the guest IDT",
+        inject_probe(cell, 6, false),
+    );
+    check(
+        "event with error code injected through the guest IDT",
+        inject_probe(cell, 13, true),
     );
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
@@ -767,6 +785,273 @@ fn feature_control_probe(cell: &mut Vmcs) -> bool {
         );
     }
     drop(stack);
+    ok
+}
+
+/// Guest-physical — and, through the guest's identity paging, guest-virtual —
+/// address of the data page the own-address-space guest reads and writes.
+const GUEST_DATA: u64 = 0x2000;
+/// The top of the own-address-space guest's stack; its stack page is the 4 KiB
+/// below this.
+const GUEST_STACK_TOP: u64 = 0x4000;
+/// Guest-virtual base the own-address-space guest's code runs at.
+const GUEST_CODE: u64 = 0x1_0000;
+/// Guest-physical addresses of the guest's own paging structures, which the
+/// processor reaches through EPT from the guest's `CR3`, never through a
+/// guest-virtual address.
+const GUEST_PML4: u64 = 0x2_0000;
+/// Guest-physical address of the guest page-directory-pointer table.
+const GUEST_PDPT: u64 = 0x2_1000;
+/// Guest-physical address of the guest page directory.
+const GUEST_PD: u64 = 0x2_2000;
+
+/// The value the host plants in the guest's data page for it to read.
+const GUEST_PLANTED: u64 = 0xFEED_FACE_CAFE_BEEF;
+/// The value the guest writes into its data page and reads back, which proves
+/// the EPT mapping of that page is writable.
+const GUEST_WRITTEN: u64 = 0x0BAD_C0DE_1234_5678;
+
+/// Present and writable: the flags a guest paging entry pointing at a lower
+/// level carries.
+const PTE_PRESENT_WRITABLE: u64 = 0b11;
+/// The page-size bit, which marks a page-directory entry a 2-MiB leaf.
+const PTE_LARGE: u64 = 1 << 7;
+
+/// The access every page of the own-address-space guest is granted in EPT:
+/// read, write and execute, so one mapping serves code, stack, data and the
+/// guest's own page tables alike.
+const GUEST_EPT_ACCESS: EptAccess = EptAccess::READ
+    .union(EptAccess::WRITE)
+    .union(EptAccess::EXECUTE);
+
+/// A guest that reads a planted value from its own data page, writes a second
+/// value there and reads it back, then `VMCALL`s with both.
+///
+/// It runs on its own page tables, so the address `0x2000` it names is a
+/// guest-virtual address its paging turns into a guest-physical one, which EPT
+/// then turns into the host frame the host planted the value in — two
+/// translations, neither of them the identity the earlier EPT guest used.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_own_space() {
+    core::arch::naked_asm!(
+        "mov rdi, {data}",
+        "mov r8, [rdi]",
+        "mov rax, {written}",
+        "mov [rdi], rax",
+        "mov r9, [rdi]",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        data = const GUEST_DATA,
+        written = const GUEST_WRITTEN,
+    );
+}
+
+/// Runs a guest in its own address space behind a non-identity EPT and checks
+/// it read the planted value and the value it wrote back.
+///
+/// The guest's three live pages (code, data, stack) and its three paging
+/// structures are each given a guest-physical address of the host's choosing
+/// and mapped through EPT to a host frame that is not that address, so reaching
+/// the `VMCALL` with both values proves the guest paging and the EPT
+/// translation both work and compose.
+fn own_address_space_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let mut data = Page::zeroed();
+    let stack = Page::zeroed();
+    let mut pml4 = Page::zeroed();
+    let mut pdpt = Page::zeroed();
+    let mut pd = Page::zeroed();
+
+    data.0[..8].copy_from_slice(&GUEST_PLANTED.to_le_bytes());
+    pml4.0[..8].copy_from_slice(&(GUEST_PDPT | PTE_PRESENT_WRITABLE).to_le_bytes());
+    pdpt.0[..8].copy_from_slice(&(GUEST_PD | PTE_PRESENT_WRITABLE).to_le_bytes());
+    // The one page-directory entry is a 2-MiB leaf mapping guest-virtual
+    // 0..2 MiB onto guest-physical 0..2 MiB, which covers every address the
+    // guest names.
+    pd.0[..8].copy_from_slice(&(PTE_LARGE | PTE_PRESENT_WRITABLE).to_le_bytes());
+
+    let at = |page: &Page| VirtAddr::new(core::ptr::from_ref(&page.0).addr() as u64);
+    let (Ok(data_pa), Ok(stack_pa), Ok(pml4_pa), Ok(pdpt_pa), Ok(pd_pa)) = (
+        space.translate(at(&data)),
+        space.translate(at(&stack)),
+        space.translate(at(&pml4)),
+        space.translate(at(&pdpt)),
+        space.translate(at(&pd)),
+    ) else {
+        error!("vmx: own-address could not translate its frames");
+        return false;
+    };
+
+    // The guest's code runs in place: its real host page is mapped into the
+    // guest at GUEST_CODE, so no bytes are copied. A second page follows in case
+    // the function straddles a page boundary.
+    let fn_va = (guest_own_space as *const ()).addr() as u64;
+    let code_page = fn_va & !0xFFF;
+    let (Ok(code_pa0), Ok(code_pa1)) = (
+        space.translate(VirtAddr::new(code_page)),
+        space.translate(VirtAddr::new(code_page + PAGE_BYTES as u64)),
+    ) else {
+        error!("vmx: own-address could not translate its code page");
+        return false;
+    };
+
+    let mut memory = EptMemory {
+        frames: Vec::new(),
+        space,
+    };
+    let Some(root) = memory.allocate() else {
+        error!("vmx: own-address could not allocate the EPT root");
+        return false;
+    };
+    let mappings = [
+        (GUEST_DATA, data_pa.as_u64()),
+        (GUEST_STACK_TOP - PAGE_BYTES as u64, stack_pa.as_u64()),
+        (GUEST_CODE, code_pa0.as_u64()),
+        (GUEST_CODE + PAGE_BYTES as u64, code_pa1.as_u64()),
+        (GUEST_PML4, pml4_pa.as_u64()),
+        (GUEST_PDPT, pdpt_pa.as_u64()),
+        (GUEST_PD, pd_pa.as_u64()),
+    ];
+    for (gpa, hpa) in mappings {
+        if ept::map(
+            &mut memory,
+            root,
+            gpa,
+            hpa,
+            GUEST_EPT_ACCESS,
+            EptMemoryType::WriteBack,
+        )
+        .is_err()
+        {
+            error!("vmx: own-address EPT mapping of {gpa:#x} failed");
+            return false;
+        }
+    }
+    let eptp = ept::pointer(root);
+
+    let rip = GUEST_CODE | (fn_va & 0xFFF);
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest's
+    // code, stack and data are reachable through the EPT and its own page tables
+    // built above, and the CR3 override points at the guest's PML4.
+    let programmed = unsafe {
+        program_guest(cell, Some(eptp), rip, GUEST_STACK_TOP)
+            .and_then(|()| cell.write(Field::GUEST_CR3, GUEST_PML4))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: own-address programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let ok = reached && registers.r8 == GUEST_PLANTED && registers.r9 == GUEST_WRITTEN;
+    if !ok {
+        error!(
+            "vmx: own-address: reached {reached}, planted {:#x}, written {:#x}",
+            registers.r8, registers.r9
+        );
+    }
+    // The EPT tables, guest paging frames and data/stack pages are all walked by
+    // the processor for the whole of the run above, so they are dropped only now.
+    drop((data, stack, pml4, pdpt, pd, memory));
+    ok
+}
+
+/// The marker the injected-event handler writes, recognizable and spanning all
+/// eight bytes.
+const INJECT_MARKER: u64 = 0x1515_2020_2525_3030;
+
+/// The handler the injected events vector to: it records a marker and
+/// `VMCALL`s.
+///
+/// Reaching it is the whole of the proof — the only way control arrives here is
+/// the processor delivering the injected event through the gate the host placed
+/// in the guest's IDT.
+#[unsafe(naked)]
+unsafe extern "C" fn inject_handler() {
+    core::arch::naked_asm!(
+        "mov r8, {marker}",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        marker = const INJECT_MARKER,
+    );
+}
+
+/// A guest whose own code never runs, because the event injected on entry is
+/// delivered before its first instruction.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_idle() {
+    core::arch::naked_asm!("2:", "hlt", "jmp 2b");
+}
+
+/// Writes a 64-bit interrupt gate for `vector` into `idt`, pointing at
+/// `handler` with code selector `cs`, present and ring 0.
+fn write_gate(idt: &mut Page, vector: u8, handler: u64, cs: u16) {
+    let base = usize::from(vector) * 16;
+    idt.0[base..base + 2].copy_from_slice(&((handler & 0xFFFF) as u16).to_le_bytes());
+    idt.0[base + 2..base + 4].copy_from_slice(&cs.to_le_bytes());
+    idt.0[base + 4] = 0;
+    // Present, descriptor-privilege zero, 64-bit interrupt-gate type.
+    idt.0[base + 5] = 0x8E;
+    idt.0[base + 6..base + 8].copy_from_slice(&(((handler >> 16) & 0xFFFF) as u16).to_le_bytes());
+    idt.0[base + 8..base + 12]
+        .copy_from_slice(&(((handler >> 32) & 0xFFFF_FFFF) as u32).to_le_bytes());
+    idt.0[base + 12..base + 16].copy_from_slice(&0u32.to_le_bytes());
+}
+
+/// Injects `vector` into a guest that owns an IDT whose gate for it points at
+/// [`inject_handler`], and checks the handler ran.
+///
+/// The guest runs in the host's address space with no second translation, so
+/// its IDT, the handler and the stack the processor pushes the interrupt frame
+/// onto are all reachable directly. `error_code` injects the event as one that
+/// carries an error code, which the processor pushes before the frame.
+fn inject_probe(cell: &mut Vmcs, vector: u8, error_code: bool) -> bool {
+    let mut idt = Page::zeroed();
+    let stack = Page::zeroed();
+    let handler = (inject_handler as *const ()).addr() as u64;
+    write_gate(&mut idt, vector, handler, CS::get_reg().0);
+    let idt_base = core::ptr::from_ref(&idt.0).addr() as u64;
+
+    let rip = (guest_idle as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    let event = Interruption::inject(vector, Kind::HardwareException, error_code);
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // shares the host address space with no EPT, so `rip`, the IDT at `idt_base`
+    // and `rsp` are all host-mapped, and the injected vector has a present gate.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| cell.write(Field::GUEST_IDTR_BASE, idt_base))
+            .and_then(|()| cell.write(Field::GUEST_IDTR_LIMIT, 0xFFF))
+            .and_then(|()| cell.write(Field::VM_ENTRY_INTERRUPTION_INFO, u64::from(event.bits())))
+            .and_then(|()| {
+                if error_code {
+                    cell.write(Field::VM_ENTRY_EXCEPTION_ERROR_CODE, 0)
+                } else {
+                    Ok(())
+                }
+            })
+    };
+    if let Err(error) = programmed {
+        error!("vmx: injection programming failed: {error}");
+        drop((idt, stack));
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let ok = reached && registers.r8 == INJECT_MARKER;
+    if !ok {
+        error!(
+            "vmx: injection vector {vector}: reached {reached}, marker {:#x}",
+            registers.r8
+        );
+    }
+    drop((idt, stack));
     ok
 }
 
