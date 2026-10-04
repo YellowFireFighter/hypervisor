@@ -84,8 +84,10 @@ pub struct Loader {
 /// An EFI image that firmware has loaded but not started.
 #[derive(Clone, Copy, Debug)]
 pub struct GuestImage {
-    /// Handle firmware assigned to the loaded image.
-    pub handle: Handle,
+    /// Handle firmware assigned to the loaded image, or `None` under the
+    /// `no-guest` feature, where no boot manager is loaded and the portal's
+    /// `StartImage` must be given nothing to start rather than a live image.
+    pub handle: Option<Handle>,
 }
 
 /// Finds the guest image and asks firmware to load it.
@@ -112,9 +114,7 @@ pub struct GuestImage {
 /// None under `no-guest`.
 pub fn load_guest() -> Result<GuestImage, LoaderError> {
     if cfg!(feature = "no-guest") {
-        return Ok(GuestImage {
-            handle: boot::image_handle(),
-        });
+        return Ok(GuestImage { handle: None });
     }
     let mut matches = Vec::new();
     for handle in
@@ -136,7 +136,7 @@ pub fn load_guest() -> Result<GuestImage, LoaderError> {
         (None, _) => return Err(LoaderError::GuestImageAmbiguous),
     };
     Ok(GuestImage {
-        handle: load_from(volume)?,
+        handle: Some(load_from(volume)?),
     })
 }
 

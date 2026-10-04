@@ -223,10 +223,13 @@ fn boot(
     );
 
     let guest = firmware::load_guest()?;
-    info!(
-        "loader: guest image loaded as {:#x}",
-        wide(guest.handle.as_ptr() as usize)
-    );
+    match guest.handle {
+        Some(handle) => info!(
+            "loader: guest image loaded as {:#x}",
+            wide(handle.as_ptr() as usize)
+        ),
+        None => info!("loader: no guest image loaded (no-guest)"),
+    }
 
     let survey = survey_memory(chunk_base)?;
     let memory = survey.memory;
@@ -566,7 +569,9 @@ fn publish(
         loader_image_handle: loader.handle.as_ptr(),
         loader_image_base: loader.base,
         loader_image_size: loader.size,
-        guest_image_handle: guest.handle.as_ptr(),
+        guest_image_handle: guest
+            .handle
+            .map_or(core::ptr::null_mut(), |handle| handle.as_ptr()),
         chunk_base: chunk_base.as_u64(),
         chunk_size: chunk::CHUNK_SIZE,
         chunk_layout: chunk::LAYOUT,
