@@ -42,6 +42,13 @@ const _: () = assert!(WALK_LENGTH as usize == LEVELS);
 /// Bytes a leaf at the page-directory level maps.
 const LARGE_PAGE: u64 = 2 * 1024 * 1024;
 
+/// Bytes a leaf at the lowest level maps.
+const SMALL_PAGE: u64 = 4096;
+
+/// How many 4-KiB leaves a 2-MiB large page splits into.
+const SPLIT_FANOUT: usize = (LARGE_PAGE / SMALL_PAGE) as usize;
+const _: () = assert!(SPLIT_FANOUT == ENTRIES);
+
 /// Bytes one page-directory of large pages covers: the whole of its 512 leaves.
 const DIRECTORY_SPAN: u64 = LARGE_PAGE * ENTRIES as u64;
 
@@ -150,22 +157,47 @@ pub fn map(
 ) -> Result<(), EptError> {
     let mut structure = root;
     // Walk the three pointer levels, creating a child wherever the path does not
-    // yet have one, and descend into it.
+    // yet have one, splitting a large page where the path runs through one, and
+    // descending into it.
     for level in 0..LEVELS - 1 {
         let slot = index(level, guest_physical);
         let existing = memory.table(structure)[slot];
-        let child = if existing.is_present() {
+        let child = if existing.is_present() && !existing.is_large() {
             existing.address()
         } else {
-            let fresh = memory.allocate().ok_or(EptError::OutOfFrames)?;
-            memory.table(structure)[slot] = EptEntry::table(fresh, ALL_ACCESS);
-            fresh
+            let table = if existing.is_present() {
+                split_large(memory, existing)?
+            } else {
+                memory.allocate().ok_or(EptError::OutOfFrames)?
+            };
+            memory.table(structure)[slot] = EptEntry::table(table, ALL_ACCESS);
+            table
         };
         structure = child;
     }
     let slot = index(LEVELS - 1, guest_physical);
     memory.table(structure)[slot] = EptEntry::leaf(host_physical, access, memory_type, false);
     Ok(())
+}
+
+/// Splits a 2-MiB large page into a page table of 4-KiB leaves mapping the same
+/// range with the same access and memory type, and returns the new table's
+/// physical address.
+///
+/// Only the 2-MiB page-directory leaves [`identity`] builds are ever split; the
+/// builder produces no 1-GiB leaves, so the children are always 4-KiB. The
+/// split preserves the mapping exactly, so the caller can then place a finer
+/// entry beneath it without disturbing the rest of the range.
+fn split_large(memory: &mut impl Memory, large: EptEntry) -> Result<u64, EptError> {
+    let table = memory.allocate().ok_or(EptError::OutOfFrames)?;
+    let base = large.address();
+    let access = large.access();
+    let memory_type = large.memory_type().unwrap_or(EptMemoryType::WriteBack);
+    for slot in 0..SPLIT_FANOUT {
+        memory.table(table)[slot] =
+            EptEntry::leaf(base + slot as u64 * SMALL_PAGE, access, memory_type, false);
+    }
+    Ok(table)
 }
 
 #[cfg(test)]
@@ -280,6 +312,42 @@ mod tests {
         assert_eq!(leaf.address(), host);
         assert!(!leaf.is_large());
         assert_eq!(leaf.access(), EptAccess::READ | EptAccess::EXECUTE);
+    }
+
+    #[test]
+    fn mapping_a_page_inside_a_large_identity_page_splits_it() {
+        // Build an identity map, then place one 4-KiB page over a frame inside
+        // an existing 2-MiB large page. The large page must split: the target
+        // frame gets the finer entry, and a sibling 4-KiB frame in the same
+        // 2-MiB page still maps to itself, so the rest of the range is intact.
+        let mut memory = TestMemory::new();
+        let eptp = identity(&mut memory, 2).expect("frames are unbounded in the test");
+        let large_base = DIRECTORY_SPAN + 5 * LARGE_PAGE;
+        let target = large_base + 7 * 0x1000;
+        let sibling = large_base + 9 * 0x1000;
+        let rwx = EptAccess::READ | EptAccess::WRITE | EptAccess::EXECUTE;
+        map(
+            &mut memory,
+            eptp.root(),
+            target,
+            target,
+            rwx,
+            EptMemoryType::Uncacheable,
+        )
+        .expect("frames are unbounded");
+
+        let pdpt = memory.table(eptp.root())[0].address();
+        let directory = memory.table(pdpt)[1].address();
+        let table_entry = memory.table(directory)[5];
+        assert!(!table_entry.is_large(), "the large page did not split");
+        let table = table_entry.address();
+        let placed = memory.table(table)[7];
+        assert_eq!(placed.address(), target);
+        assert!(!placed.is_large());
+        assert_eq!(placed.memory_type(), Some(EptMemoryType::Uncacheable));
+        let kept = memory.table(table)[9];
+        assert_eq!(kept.address(), sibling, "the split lost a sibling page");
+        assert_eq!(kept.memory_type(), Some(EptMemoryType::WriteBack));
     }
 
     #[test]
