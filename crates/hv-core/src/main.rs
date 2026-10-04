@@ -204,6 +204,19 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     unsafe { space.drop_lower_half() }?;
     info!("core: dropped the firmware half of the address space");
 
+    // The Intel VMX self-test, when this build is for it: it needs only the
+    // address space, the descriptor tables and the model-specific-register
+    // probe, all established above, so it runs here rather than after the ACPI
+    // and clock bring-up below — neither of which it uses, and both of which do
+    // work that only a real machine's firmware exercises. It halts afterward,
+    // since the guest path below is AMD SVM and cannot run on an Intel machine.
+    // The `if` guards the return on a value the compiler cannot fold away, so
+    // the SVM path below is not flagged unreachable under the feature.
+    #[cfg(feature = "vmx-selftest")]
+    if selftest::run(&space) {
+        return Err(CoreError::VmxSelfTestComplete);
+    }
+
     // Logged on this side of the transition rather than the other, because that
     // is what proves the capture survived it: nothing firmware left is
     // addressable any more, and these numbers come out of the chunk.
@@ -213,16 +226,6 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     let acpi = survey_machine(handoff, &space)?;
     start_clock(&mut space, &acpi, handoff)?;
     screen.advance(Step::Clock);
-
-    // The Intel VMX self-test, when this build is for it: run the first piece
-    // of the unverified VMX path on real hardware and halt, since the guest
-    // path below is AMD SVM and cannot run on an Intel machine. The `if` guards
-    // the return on a value the compiler cannot fold away, so the SVM path
-    // below is not flagged unreachable under the feature.
-    #[cfg(feature = "vmx-selftest")]
-    if selftest::run(&space) {
-        return Err(CoreError::VmxSelfTestComplete);
-    }
 
     // The guest path below enables and runs AMD SVM, which an Intel processor
     // does not have. Choose the backend by vendor: AMD proceeds, and Intel stops
