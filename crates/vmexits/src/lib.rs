@@ -26,6 +26,10 @@
 //!   qualification and reported. Neither has a handler yet — a guest's own
 //!   memory and control-register virtualization are later layers — so each
 //!   stops the guest with the decoded reason rather than resuming blindly.
+//! - An APIC-write, taken when the guest writes a register of its virtualized
+//!   APIC that the processor leaves to the host; the value is in the
+//!   virtual-APIC page and the guest resumes, delivering its effect being a
+//!   later layer's work.
 //! - The VMX instructions, which a guest told it has no virtualization
 //!   extension must not find working: each is refused with an invalid-opcode
 //!   exception delivered through the guest's own descriptor table, the
@@ -184,6 +188,16 @@ pub unsafe fn dispatch(cell: &Vmcs, registers: &mut Registers) -> Flow {
                 ))),
                 Err(fail) => Flow::Stop(Stop::Vmcs(fail)),
             }
+        }
+        BasicExitReason::APIC_WRITE => {
+            // The guest wrote a register of its virtualized APIC. The value is
+            // already in the virtual-APIC page; carrying its effect onto the
+            // machine — an inter-processor interrupt above all — is the virtual
+            // controller's work, which this layer does not drive yet, so the
+            // write stands in the page and the guest resumes. The exit is
+            // trap-like, taken after the instruction, so the RIP is already
+            // past it and must not be advanced.
+            Flow::Resume
         }
         BasicExitReason::VMCLEAR
         | BasicExitReason::VMLAUNCH
