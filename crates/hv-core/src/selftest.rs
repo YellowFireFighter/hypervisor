@@ -217,9 +217,20 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
         tpr_threshold_probe(cell, space),
     );
 
+    backend_checks(cell, space, &mut check);
     apicv_checks(cell, space, &mut check);
 
     info!("vmx: SELF-TEST SUMMARY: {passed}/{total} checks passed");
+}
+
+/// Runs the checks that complete the dispatch loop: the hypercall round-trip
+/// and the MSR bitmap, neither of which needs a second translation.
+fn backend_checks(cell: &mut Vmcs, space: &AddressSpace, check: &mut impl FnMut(&str, bool)) {
+    check("hypercall decoded and answered", hypercall_probe(cell));
+    check(
+        "MSR bitmap exits only the trapped register",
+        msr_bitmap_probe(cell, space),
+    );
 }
 
 /// Round-trips a field of each width through the current VMCS, which exercises
@@ -1603,6 +1614,204 @@ fn run_loop_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         );
     }
     drop(partition);
+    ok
+}
+
+/// A partition that resolves no fault, for guests that run in the host address
+/// space with no second translation and so take no EPT violation.
+struct Unmapped;
+
+impl Partition for Unmapped {
+    fn fault(&mut self, _gpa: u64) -> bool {
+        false
+    }
+}
+
+/// The command word the hypercall guest issues, an aligned buffer address, and
+/// a capacity large enough for the command it names, so the request decodes.
+const HYPERCALL_COMMAND: u64 = hypercall::Command::APIC_DUMP.word();
+/// An eight-aligned buffer address the hypercall guest passes.
+const HYPERCALL_BUFFER: u64 = 0x8000;
+/// A buffer capacity at least the command's required size.
+const HYPERCALL_CAPACITY: u64 = hypercall::Command::APIC_DUMP.bytes();
+
+/// A guest that issues a hypercall, then reads the status it was answered with
+/// and `VMCALL`s again to end.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_hypercall() {
+    core::arch::naked_asm!(
+        "mov rax, {command}",
+        "mov rdi, {buffer}",
+        "mov rsi, {capacity}",
+        "vmcall",
+        "mov r8, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        command = const HYPERCALL_COMMAND,
+        buffer = const HYPERCALL_BUFFER,
+        capacity = const HYPERCALL_CAPACITY,
+    );
+}
+
+/// Runs the hypercall guest, decodes the `VMMCALL` it makes through the real
+/// interface, answers it, and checks the status reached the guest.
+///
+/// The run loop returns on the guest's first `VMCALL`; the host decodes the
+/// registers it carried, writes [`Status::Ok`](hypercall::Status::Ok) back,
+/// steps past the instruction and resumes, and the guest's second `VMCALL`
+/// carries the status it read — proving the call crossed into the host and the
+/// answer crossed back.
+fn hypercall_probe(cell: &mut Vmcs) -> bool {
+    let stack = Page::zeroed();
+    let rip = (guest_hypercall as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // runs in the host address space.
+    if let Err(error) = unsafe { program_guest(cell, None, rip, rsp) } {
+        error!("vmx: hypercall programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let mut unmapped = Unmapped;
+    // SAFETY: `cell` is current and fully programmed, and no EPT means no fault.
+    let made = unsafe { vmexits::run(cell, &mut registers, &mut unmapped) };
+    let decoded = hypercall::decode(registers.rax, registers.rdi, registers.rsi);
+    let request_ok = matches!(
+        decoded,
+        hypercall::Decoded::Request(request)
+            if request.command == hypercall::Command::APIC_DUMP
+                && request.buffer == HYPERCALL_BUFFER
+                && request.capacity == HYPERCALL_CAPACITY
+    );
+
+    registers.rax = hypercall::Status::Ok.word();
+    // SAFETY: `cell` is current and the exit was on the hypercall VMCALL.
+    let advanced = unsafe { cell.advance_past_instruction() }.is_ok();
+    // SAFETY: `cell` is current and programmed.
+    let done = unsafe { vmexits::run(cell, &mut registers, &mut unmapped) };
+
+    let ok = made == Exit::Vmcall
+        && request_ok
+        && advanced
+        && done == Exit::Vmcall
+        && registers.r8 == hypercall::Status::Ok.word();
+    if !ok {
+        error!(
+            "vmx: hypercall: made {made:?}, decoded {decoded:?}, status {:#x}",
+            registers.r8
+        );
+    }
+    drop(stack);
+    ok
+}
+
+/// The base of the model-specific registers reached through the high half of an
+/// MSR bitmap.
+const MSR_HIGH_BASE: u32 = 0xC000_0000;
+/// The byte offset of the high-half read bitmap within an MSR bitmap page.
+const MSR_BITMAP_READ_HIGH: usize = 0x400;
+
+/// A guest that reads a passed-through register and a trapped one, then
+/// `VMCALL`s with what the trapped read returned.
+///
+/// `IA32_TSC` is left out of the bitmap, so its read does not exit; `IA32_EFER`
+/// is trapped, so its read does, and the host forwards it.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_msr_bitmap() {
+    core::arch::naked_asm!(
+        "mov ecx, 0x10",
+        "rdmsr",
+        "mov ecx, {efer}",
+        "rdmsr",
+        "mov r8, rax",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        efer = const IA32_EFER,
+    );
+}
+
+/// Runs the MSR-bitmap guest and checks only the trapped register exited.
+///
+/// With the bitmap programmed to trap `IA32_EFER` alone, the guest's read of
+/// the passed-through `IA32_TSC` takes no exit while its read of `IA32_EFER`
+/// takes exactly one, and the value forwarded for it matches the machine's own.
+fn msr_bitmap_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let mut bitmap = Page::zeroed();
+    let efer_index = (IA32_EFER - MSR_HIGH_BASE) as usize;
+    bitmap.0[MSR_BITMAP_READ_HIGH + efer_index / 8] |= 1 << (efer_index % 8);
+    let stack = Page::zeroed();
+    let Ok(bitmap_pa) =
+        space.translate(VirtAddr::new(core::ptr::from_ref(&bitmap.0).addr() as u64))
+    else {
+        error!("vmx: MSR-bitmap could not translate its page");
+        return false;
+    };
+
+    let rip = (guest_msr_bitmap as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // runs in the host address space and the bitmap is a real, page-aligned frame.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| {
+                let primary = cell.read(Field::PRIMARY_PROC_CONTROLS)?;
+                cell.write(
+                    Field::PRIMARY_PROC_CONTROLS,
+                    primary | u64::from(PrimaryProc::USE_MSR_BITMAPS.bits()),
+                )
+            })
+            .and_then(|()| cell.write(Field::MSR_BITMAP, bitmap_pa.as_u64()))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: MSR-bitmap programming failed: {error}");
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let mut rdmsr_exits = 0_u32;
+    let mut reached = false;
+    for _ in 0..MAX_ENTRIES {
+        // SAFETY: `cell` is current and fully programmed.
+        match unsafe { run::run(cell, &mut registers) } {
+            Entered::Failed(fail) => {
+                error!("vmx: MSR-bitmap entry rejected ({fail})");
+                break;
+            }
+            Entered::Exited => {
+                let reason = exit_reason(cell);
+                // SAFETY: the guest exited and `registers` holds its state.
+                match unsafe { vmexits::dispatch(cell, &mut registers) } {
+                    Flow::Resume => {
+                        if reason == Some(BasicExitReason::RDMSR) {
+                            rdmsr_exits += 1;
+                        }
+                    }
+                    Flow::Vmcall => {
+                        reached = true;
+                        break;
+                    }
+                    Flow::Stop(stop) => {
+                        error!("vmx: MSR-bitmap stopped: {stop:?}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let efer = probe::read(IA32_EFER).unwrap_or(0) & 0xFFFF_FFFF;
+    let ok = reached && rdmsr_exits == 1 && registers.r8 == efer;
+    if !ok {
+        error!(
+            "vmx: MSR-bitmap: reached {reached}, rdmsr exits {rdmsr_exits}, efer {:#x} vs {efer:#x}",
+            registers.r8
+        );
+    }
+    drop((bitmap, stack));
     ok
 }
 

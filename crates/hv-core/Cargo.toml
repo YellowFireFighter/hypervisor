@@ -26,6 +26,9 @@ descriptors = { workspace = true }
 emulate = { workspace = true }
 exits = { workspace = true }
 handoff = { workspace = true }
+# The guest-to-hypervisor call interface, used by the self-test to prove a
+# guest VMMCALL decodes and is answered; pulled in only with that feature.
+hypercall = { workspace = true, optional = true }
 ipi = { workspace = true }
 log = { workspace = true }
 npt = { workspace = true }
@@ -85,7 +88,7 @@ splash = []
 # bring-up and then halts, because the rest of pulzar is AMD SVM and cannot
 # proceed on an Intel machine. For bringing the unverified Intel path up on
 # real hardware; off in every ordinary build.
-vmx-selftest = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits"]
+vmx-selftest = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits", "dep:hypercall"]
 
 [lints]
 workspace = true

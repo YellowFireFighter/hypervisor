@@ -577,6 +577,7 @@ dependencies = [
  "ept",
  "exits",
  "handoff",
+ "hypercall",
  "ipi",
  "log",
  "npt",
