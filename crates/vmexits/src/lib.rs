@@ -48,7 +48,7 @@ mod cpuid;
 mod msr;
 pub mod violation;
 
-use vmcs::{Registers, VmFail, Vmcs};
+use vmcs::{Entered, Registers, VmFail, Vmcs};
 use vmx::{BasicExitReason, ExitReason, Field};
 
 /// What the host decided to do about a guest's exit.
@@ -87,8 +87,34 @@ pub enum Stop {
     /// A VMX instruction the dispatch itself issued was refused — reading the
     /// exit reason or advancing past the instruction failed.
     Vmcs(VmFail),
+    /// `VMLAUNCH` or `VMRESUME` was rejected without running the guest; the
+    /// failure distinguishes the two VMX failure modes.
+    EntryRejected(VmFail),
     /// An exit this layer does not yet answer.
     Unhandled(BasicExitReason),
+}
+
+/// What owns a guest's memory and resolves the faults it takes.
+///
+/// The run loop hands an EPT violation to [`fault`](Partition::fault) rather
+/// than deciding what a guest's memory is itself: mapping a page, trapping a
+/// device's register, or refusing an access the guest may not make are all the
+/// owner's policy, the way `partition` is on the SVM side.
+pub trait Partition {
+    /// Resolves the EPT violation at guest-physical `gpa`, returning whether
+    /// the guest may be retried — `false` stops it. A resolution that
+    /// changes the EPT must flush the stale translation itself before
+    /// returning.
+    fn fault(&mut self, gpa: u64) -> bool;
+}
+
+/// How a run of a guest ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// The guest made a `VMCALL`; the caller answers it and may resume.
+    Vmcall,
+    /// The guest stopped and cannot be resumed; the reason says why.
+    Stopped(Stop),
 }
 
 /// Answers the exit the current VMCS records, editing `registers` as the exit
@@ -170,5 +196,52 @@ unsafe fn advance(cell: &Vmcs) -> Flow {
     match unsafe { cell.advance_past_instruction() } {
         Ok(()) => Flow::Resume,
         Err(fail) => Flow::Stop(Stop::Vmcs(fail)),
+    }
+}
+
+/// Runs the guest the current VMCS describes until it stops, dispatching every
+/// exit and asking `partition` to resolve each EPT violation.
+///
+/// This is the VMX counterpart to the SVM run loop: it enters the guest, hands
+/// each exit to [`dispatch`], resumes on the ones that were answered, and asks
+/// the [`Partition`] to resolve an EPT violation and retry — returning
+/// [`Exit::Vmcall`] when the guest calls into the host and [`Exit::Stopped`]
+/// when it cannot go on.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, fully programmed, with
+/// this processor in VMX operation; `registers` must be the guest's register
+/// block. [`probe::install`] must have claimed the general-protection vector,
+/// which the `RDMSR`/`WRMSR` forwarding relies on.
+pub unsafe fn run(
+    cell: &mut Vmcs,
+    registers: &mut Registers,
+    partition: &mut impl Partition,
+) -> Exit {
+    loop {
+        // SAFETY: the caller guarantees a current, fully programmed VMCS in VMX
+        // operation, and the loop preserves that across each entry.
+        match unsafe { vmcs::run::run(cell, registers) } {
+            Entered::Failed(fail) => return Exit::Stopped(Stop::EntryRejected(fail)),
+            // SAFETY: the guest exited, so the VMCS records the exit it stopped
+            // on and `registers` holds the state the world switch saved.
+            Entered::Exited => match unsafe { dispatch(cell, registers) } {
+                Flow::Resume => {}
+                Flow::Vmcall => return Exit::Vmcall,
+                Flow::Stop(Stop::EptViolation(violation)) => {
+                    // SAFETY: `cell` is current, so the faulting address is
+                    // readable.
+                    let gpa = match unsafe { cell.read(Field::GUEST_PHYSICAL_ADDRESS) } {
+                        Ok(gpa) => gpa,
+                        Err(fail) => return Exit::Stopped(Stop::Vmcs(fail)),
+                    };
+                    if !partition.fault(gpa) {
+                        return Exit::Stopped(Stop::EptViolation(violation));
+                    }
+                }
+                Flow::Stop(stop) => return Exit::Stopped(stop),
+            },
+        }
     }
 }
