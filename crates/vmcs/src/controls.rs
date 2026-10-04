@@ -13,10 +13,11 @@
 //! own bits) and the VMCS link pointer (no shadow).
 
 use vmx::{
-    Capability, EptPointer, Field, PrimaryProc, SecondaryProc, VmEntry, VmExit,
+    Capability, EptPointer, Field, PrimaryProc, SecondaryProc, VmEntry, VmExit, VmxBasic,
+    basic::IA32_VMX_BASIC,
     control::{
         IA32_VMX_ENTRY_CTLS, IA32_VMX_EXIT_CTLS, IA32_VMX_PINBASED_CTLS, IA32_VMX_PROCBASED_CTLS,
-        IA32_VMX_PROCBASED_CTLS2,
+        IA32_VMX_PROCBASED_CTLS2, IA32_VMX_TRUE_PROCBASED_CTLS,
     },
 };
 
@@ -131,4 +132,50 @@ pub unsafe fn ept_available() -> bool {
         let secondary = Capability::from_bits(msr::rdmsr(IA32_VMX_PROCBASED_CTLS2));
         secondary.allows(SecondaryProc::ENABLE_EPT.bits())
     }
+}
+
+/// Stops the guest exiting on its own `CR3` loads and stores, when the
+/// processor allows it.
+///
+/// The non-"true" primary capability register forces `CR3`-load and
+/// `CR3`-store exiting on, a legacy of processors without EPT that needed to
+/// watch a guest's paging. With EPT the guest owns its `CR3`, and firmware run
+/// as a guest reads and writes `CR3` constantly — every exception entry saves
+/// it — so exiting on each is both needless and fatal to a guest that has no
+/// handler for it yet. A processor that reports the "true" capability registers
+/// (`IA32_VMX_BASIC` bit 55) is allowed to clear these bits; one that does not
+/// cannot, and this leaves them set and answers `false`.
+///
+/// Call it after [`program`], whose primary-control word this rewrites.
+///
+/// # Errors
+///
+/// The [`VmFail`] from the `VMREAD` or `VMWRITE` the processor rejects.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+pub unsafe fn relax_cr3_exiting(cell: &Vmcs) -> Result<bool, VmFail> {
+    // SAFETY: the caller guarantees VMX operation, on which these capability
+    // registers exist.
+    if !unsafe { VmxBasic::from_bits(msr::rdmsr(IA32_VMX_BASIC)) }.has_true_controls() {
+        return Ok(false);
+    }
+    // SAFETY: the true capability register exists once bit 55 is set.
+    let capability = Capability::from_bits(unsafe { msr::rdmsr(IA32_VMX_TRUE_PROCBASED_CTLS) });
+    let cr3_exiting = PrimaryProc::CR3_LOAD_EXITING.bits() | PrimaryProc::CR3_STORE_EXITING.bits();
+    if capability.forces(cr3_exiting) {
+        return Ok(false);
+    }
+    // SAFETY: the caller guarantees the current VMCS; the word is the one
+    // `program` already reconciled and wrote, with only the two CR3 bits
+    // cleared, which the true capability register above permits.
+    unsafe {
+        let current = u32::try_from(cell.read(Field::PRIMARY_PROC_CONTROLS)?).unwrap_or(0);
+        cell.write(
+            Field::PRIMARY_PROC_CONTROLS,
+            u64::from(current & !cr3_exiting),
+        )?;
+    }
+    Ok(true)
 }
