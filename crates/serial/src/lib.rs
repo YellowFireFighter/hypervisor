@@ -346,7 +346,7 @@ pub fn emergency(args: Arguments<'_>) {
 pub fn offer_screen(screen: &handoff::Framebuffer, address: u64) -> bool {
     #[cfg(feature = "efifb")]
     {
-        let Some(candidate) = Efifb::describe(screen, address) else {
+        let Some(mut candidate) = Efifb::describe(screen, address) else {
             return false;
         };
         interrupts::without_interrupts(|| {
@@ -365,6 +365,7 @@ pub fn offer_screen(screen: &handoff::Framebuffer, address: u64) -> bool {
             // canvas last, since a reader that finds it finds everything.
             let _ = log::set_logger(&LOGGER);
             log::set_max_level(MAX_LEVEL);
+            candidate.clear();
             SCREEN_ADDRESS.store(candidate.address, Ordering::Relaxed);
             let canvas = candidate.canvas;
             SCREEN_CANVAS.call_once(|| canvas);

@@ -28,11 +28,26 @@
 //! and continues from the top-left corner rather than from wherever the locked
 //! half got to; its line may interleave with another processor's mid-line,
 //! which is the same trade the ports make: mangled output beats none.
+//!
+//! # Scrolling without reading the screen
+//!
+//! The aperture is uncached device memory, where a store is cheap but a load
+//! waits on the bus: moving the picture up a row by copying its pixels reads
+//! every byte of the screen back, which on a large panel takes seconds per
+//! line. So the characters on screen are kept in [`Text`], in ordinary memory,
+//! and a scroll moves them there and redraws only the cells whose character
+//! changed — stores, never loads, and few of them on a log whose consecutive
+//! lines share most of their prefix. The screen is cleared when the log
+//! attaches, so what is on it and what the grid says is on it agree from the
+//! start. A writer that cannot take the grid — an emergency line racing the
+//! locked writer — draws without recording, and at the bottom row wraps to the
+//! top rather than scrolling, since there is nothing to scroll from.
 
 use core::fmt;
 
 use font8x8::legacy::BASIC_LEGACY;
 use handoff::{Channels, Framebuffer};
+use spin::Mutex;
 
 /// Pixels each glyph cell is wide and tall on the display.
 ///
@@ -62,6 +77,40 @@ const FIRST_PRINTABLE: u8 = 0x20;
 const LAST_PRINTABLE: u8 = 0x7F;
 /// What a character outside the printable range is drawn as.
 const UNKNOWN_GLYPH: u8 = b'?';
+
+/// The most cells across the log uses, which covers a 4K panel at this scale.
+const MAX_COLUMNS: usize = 256;
+/// The most cells down the log uses, which covers a 4K panel at this scale.
+const MAX_ROWS: usize = 160;
+/// What the grid holds for a cell that shows nothing. The font's glyph for it
+/// is empty, so drawing it paints the cell's background, exactly as a space
+/// does — which is why a space is recorded as this too.
+const BLANK: u8 = 0;
+
+/// The characters on screen, shared by every writer of this image's log.
+static TEXT: Mutex<Text> = Mutex::new(Text {
+    cells: [[BLANK; MAX_COLUMNS]; MAX_ROWS],
+});
+
+/// The characters on screen, one per cell, so a scroll redraws from them
+/// rather than reading the frame buffer back.
+pub(crate) struct Text {
+    /// Each cell's character, by row and then column.
+    cells: [[u8; MAX_COLUMNS]; MAX_ROWS],
+}
+
+impl Text {
+    /// Blanks every cell, in place rather than through a fresh grid, which
+    /// would be built on the stack first.
+    fn clear(&mut self) {
+        self.cells.as_flattened_mut().fill(BLANK);
+    }
+
+    /// Records that the cell `cursor` names shows `glyph`.
+    fn record(&mut self, cursor: &Cursor, glyph: u8) {
+        self.cells[cursor.row][cursor.column] = if glyph == b' ' { BLANK } else { glyph };
+    }
+}
 
 /// Where the next glyph goes, in cells.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,16 +159,21 @@ impl Canvas {
         usize::try_from(self.pitch).expect("a pitch fits a usize")
     }
 
-    /// Cells across, which is the width less any trailing partial cell.
+    /// Cells across, which is the width less any trailing partial cell, up
+    /// to the most the grid holds.
     fn columns(&self) -> usize {
         let cell = u32::try_from(CELL_WIDTH).expect("a cell width fits u32");
-        usize::try_from(self.width / cell).expect("cells across fit a usize")
+        usize::try_from(self.width / cell)
+            .expect("cells across fit a usize")
+            .min(MAX_COLUMNS)
     }
 
-    /// Cells down.
+    /// Cells down, up to the most the grid holds.
     fn rows(&self) -> usize {
         let cell = u32::try_from(CELL_HEIGHT).expect("a cell height fits u32");
-        usize::try_from(self.height / cell).expect("cells down fit a usize")
+        usize::try_from(self.height / cell)
+            .expect("cells down fit a usize")
+            .min(MAX_ROWS)
     }
 
     /// Writes one string, starting wherever the cursor says and scrolling
@@ -128,40 +182,71 @@ impl Canvas {
     /// Characters the carried font has no answer for draw as
     /// [`UNKNOWN_GLYPH`]; a newline moves to the first cell of the next row,
     /// filling a row that was already the last one by scrolling everything up.
-    pub(crate) fn write_str(&self, pixels: &mut [u8], cursor: &mut Cursor, text: &str) {
+    /// Each glyph is recorded in `grid` when there is one; without it nothing
+    /// can be scrolled, and a full display wraps to the top row instead.
+    pub(crate) fn write_str(
+        &self,
+        pixels: &mut [u8],
+        cursor: &mut Cursor,
+        mut grid: Option<&mut Text>,
+        text: &str,
+    ) {
         for character in text.chars() {
             let glyph = match u8::try_from(character) {
                 Ok(byte @ FIRST_PRINTABLE..=LAST_PRINTABLE) => byte,
                 Ok(b'\n') => {
-                    self.newline(pixels, cursor);
+                    self.newline(pixels, cursor, grid.as_deref_mut());
                     continue;
                 }
                 _ => UNKNOWN_GLYPH,
             };
             self.draw(pixels, cursor, glyph);
+            if let Some(grid) = grid.as_deref_mut() {
+                grid.record(cursor, glyph);
+            }
             cursor.column += 1;
             if cursor.column == self.columns() {
-                self.newline(pixels, cursor);
+                self.newline(pixels, cursor, grid.as_deref_mut());
             }
         }
     }
 
-    /// Moves to the first cell of the next row, scrolling a full display.
-    fn newline(&self, pixels: &mut [u8], cursor: &mut Cursor) {
+    /// Moves to the first cell of the next row, scrolling a full display, or
+    /// wrapping it to the top when there is no grid to scroll from.
+    fn newline(&self, pixels: &mut [u8], cursor: &mut Cursor, grid: Option<&mut Text>) {
         cursor.column = 0;
         cursor.row += 1;
         if cursor.row == self.rows() {
-            cursor.row -= 1;
-            self.scroll(pixels);
+            match grid {
+                Some(grid) => {
+                    cursor.row -= 1;
+                    self.scroll(pixels, grid);
+                }
+                None => cursor.row = 0,
+            }
         }
     }
 
-    /// Moves every scan line up one cell height and clears the freed row.
-    fn scroll(&self, pixels: &mut [u8]) {
-        let lift = self.pitch_bytes() * CELL_HEIGHT;
-        let tail = pixels.len() - lift;
-        pixels.copy_within(lift.., 0);
-        pixels[tail..].fill(0);
+    /// Moves every row of the grid up one and blanks the freed bottom row,
+    /// redrawing only the cells whose character changed.
+    ///
+    /// Row `row` takes what row `row + 1` held before it is itself moved, so a
+    /// single top-down pass is enough.
+    fn scroll(&self, pixels: &mut [u8], grid: &mut Text) {
+        let rows = self.rows();
+        for row in 0..rows {
+            for column in 0..self.columns() {
+                let incoming = if row + 1 < rows {
+                    grid.cells[row + 1][column]
+                } else {
+                    BLANK
+                };
+                if grid.cells[row][column] != incoming {
+                    grid.cells[row][column] = incoming;
+                    self.draw(pixels, &Cursor { column, row }, incoming);
+                }
+            }
+        }
     }
 
     /// Draws one glyph into the cell the cursor names, background included,
@@ -230,6 +315,20 @@ impl Efifb {
             cursor: Cursor::default(),
         })
     }
+
+    /// Blanks the whole screen and the grid, so the two agree before the
+    /// first line is drawn, and moves the cursor to the top-left cell.
+    ///
+    /// Whatever firmware or the loader left on the screen is not in the grid,
+    /// and a scroll redraws only the cells the grid says changed — so anything
+    /// not cleared here would stay on screen behind the log.
+    pub(crate) fn clear(&mut self) {
+        TEXT.lock().clear();
+        // SAFETY: as in `write_str`; the bytes are filled and the slice
+        // dropped before this returns.
+        unsafe { pixels(self.address, &self.canvas) }.fill(0);
+        self.cursor = Cursor::default();
+    }
 }
 
 impl fmt::Write for Efifb {
@@ -239,7 +338,6 @@ impl fmt::Write for Efifb {
             canvas,
             cursor,
         } = self;
-        let span = usize::try_from(canvas.span()).expect("the span fits a usize");
         // SAFETY: `address` was vouched for by whoever built this writer
         // through `describe`: it names the first byte of a live mapping
         // covering `canvas.span()` bytes, established once and never moved,
@@ -247,10 +345,28 @@ impl fmt::Write for Efifb {
         // output lock except the emergency path, whose interleaving is
         // accepted where it is used; and no reference into these bytes
         // outlives this call.
-        let pixels = unsafe { core::slice::from_raw_parts_mut(*address as *mut u8, span) };
-        canvas.write_str(pixels, cursor, s);
+        let pixels = unsafe { pixels(*address, canvas) };
+        // Taken without waiting: the locked writer is the only one that takes
+        // it in ordinary running, and an emergency line that finds it held
+        // draws unrecorded rather than wait on a lock its own processor may
+        // hold.
+        let mut grid = TEXT.try_lock();
+        canvas.write_str(pixels, cursor, grid.as_deref_mut(), s);
         Ok(())
     }
+}
+
+/// The frame buffer's bytes, as a slice over the mapping at `address`.
+///
+/// # Safety
+///
+/// `address` must name the first byte of a live, writable mapping covering
+/// `canvas.span()` bytes that nothing unmaps while the slice is in use, and the
+/// slice must not outlive the write it is taken for.
+unsafe fn pixels<'a>(address: u64, canvas: &Canvas) -> &'a mut [u8] {
+    let span = usize::try_from(canvas.span()).expect("the span fits a usize");
+    // SAFETY: the caller guarantees the mapping and how long the slice lives.
+    unsafe { core::slice::from_raw_parts_mut(address as *mut u8, span) }
 }
 
 #[cfg(test)]
@@ -260,10 +376,21 @@ mod tests {
     use handoff::Channels;
 
     use super::{
-        BACKGROUND, CELL_HEIGHT, CELL_WIDTH, Canvas, Cursor, FOREGROUND, GLYPH_HEIGHT, SCALE,
+        BACKGROUND, CELL_HEIGHT, CELL_WIDTH, Canvas, Cursor, FOREGROUND, GLYPH_HEIGHT, SCALE, TEXT,
+        Text,
     };
     extern crate std;
     use std::{vec, vec::Vec};
+
+    use spin::MutexGuard;
+
+    /// The image's grid, blanked, held for the rest of the test so tests that
+    /// draw through it take turns.
+    fn grid() -> MutexGuard<'static, Text> {
+        let mut grid = TEXT.lock();
+        grid.clear();
+        grid
+    }
 
     /// A screen of two cells across and two down, with no padding.
     fn small_canvas() -> Canvas {
@@ -408,7 +535,7 @@ mod tests {
         let canvas = small_canvas();
         let mut pixels = small_pixels();
         let mut cursor = Cursor::default();
-        canvas.write_str(&mut pixels, &mut cursor, "\n");
+        canvas.write_str(&mut pixels, &mut cursor, Some(&mut grid()), "\n");
         assert_eq!(cursor, Cursor { column: 0, row: 1 });
     }
 
@@ -417,7 +544,7 @@ mod tests {
         let canvas = small_canvas();
         let mut pixels = small_pixels();
         let mut cursor = Cursor::default();
-        canvas.write_str(&mut pixels, &mut cursor, "..");
+        canvas.write_str(&mut pixels, &mut cursor, Some(&mut grid()), "..");
         assert_eq!(cursor.column, 0);
         assert_eq!(cursor.row, 1);
     }
@@ -425,18 +552,18 @@ mod tests {
     #[test]
     fn a_newline_on_the_last_row_scrolls_one_cell_height_and_clears_behind_it() {
         let canvas = small_canvas();
-        let lift = usize::try_from(canvas.pitch).expect("pitch fits") * CELL_HEIGHT;
-        let mut pixels = small_pixels();
+        let mut pixels = vec![0; small_pixels().len()];
+        let mut grid = grid();
         let last_row = canvas.rows() - 1;
         let mut cursor = Cursor {
             column: 0,
             row: last_row,
         };
-        canvas.draw(&mut pixels, &cursor, b'#');
+        canvas.write_str(&mut pixels, &mut cursor, Some(&mut grid), "#");
         let drawn = inked(&pixels);
         assert!(!drawn.is_empty());
 
-        canvas.newline(&mut pixels, &mut cursor);
+        canvas.newline(&mut pixels, &mut cursor, Some(&mut grid));
 
         assert_eq!(cursor.row, last_row);
         // Every inked pixel moved up exactly one cell height and no ink is
@@ -445,8 +572,43 @@ mod tests {
             assert_eq!(pixel(&pixels, x, y - CELL_HEIGHT), FOREGROUND);
             assert_eq!(pixel(&pixels, x, y), BACKGROUND);
         }
-        // And the freed row holds zeros rather than the stand-in pattern.
-        assert!(pixels[pixels.len() - lift..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn a_scroll_redraws_only_the_cells_whose_character_changed() {
+        let canvas = small_canvas();
+        let mut pixels = vec![0; small_pixels().len()];
+        let mut grid = grid();
+        let mut cursor = Cursor::default();
+        // The same character in the same column of both rows: scrolling moves
+        // nothing a reader could see, so the cell must not be touched.
+        canvas.write_str(&mut pixels, &mut cursor, Some(&mut grid), "#\n#");
+        // Mark the top cell's background; a redraw would paint over the mark.
+        let marked = usize::try_from(canvas.pitch).expect("pitch fits") * (CELL_HEIGHT - 1);
+        pixels[marked] = 0x55;
+
+        canvas.newline(&mut pixels, &mut cursor, Some(&mut grid));
+
+        assert_eq!(pixels[marked], 0x55, "an unchanged cell was redrawn");
+        // The bottom cell, which held a character and now holds none, was
+        // redrawn as background.
+        let bottom = inked(&pixels)
+            .into_iter()
+            .filter(|(_, y)| *y >= CELL_HEIGHT)
+            .count();
+        assert_eq!(bottom, 0);
+    }
+
+    #[test]
+    fn without_a_grid_a_full_display_wraps_to_the_top_row() {
+        let canvas = small_canvas();
+        let mut pixels = small_pixels();
+        let mut cursor = Cursor {
+            column: 0,
+            row: canvas.rows() - 1,
+        };
+        canvas.write_str(&mut pixels, &mut cursor, None, "\n");
+        assert_eq!(cursor, Cursor::default());
     }
 
     #[test]
@@ -454,7 +616,7 @@ mod tests {
         let canvas = small_canvas();
         let mut pixels = small_pixels();
         let mut cursor = Cursor::default();
-        canvas.write_str(&mut pixels, &mut cursor, "\u{2603}");
+        canvas.write_str(&mut pixels, &mut cursor, Some(&mut grid()), "\u{2603}");
         // The unknown mark drew into the first cell, which is what disturbing
         // its stand-in pattern proves; the point is that nothing panicked and
         // nothing was skipped.
