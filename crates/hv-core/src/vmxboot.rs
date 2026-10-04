@@ -50,7 +50,7 @@ use vmx::{
     check::{self, GuestState, Subject},
     segment::{BUSY_TSS_TYPE, TYPE_ACCESSED},
 };
-use x86_64::VirtAddr;
+use x86_64::{PhysAddr, VirtAddr};
 
 /// Bytes in a gibibyte, the unit the EPT identity map is sized in.
 const GIB: u64 = 1 << 30;
@@ -93,6 +93,17 @@ const RFLAGS_INTERRUPT_ENABLE: u64 = 1 << 9;
 /// How far the virtual timer's initial count is shifted to get its per-quantum
 /// step, so it counts down over roughly this many quanta.
 const TIMER_STEP_SHIFT: u32 = 4;
+
+/// The lowest vector the local APIC delivers. A local-vector-table entry
+/// programmed with a vector below this raises an illegal-vector error instead
+/// of delivering an interrupt, so such an entry is not injected — doing so
+/// would feed the guest an interrupt its real APIC never would.
+const MIN_DELIVERABLE_VECTOR: u32 = 0x10;
+
+/// How many bytes of the instruction stream to read back from a spinning
+/// guest, enough to capture a tight firmware poll loop and decode what it
+/// waits on.
+const SPIN_CODE_BYTES: u64 = 32;
 
 /// The four VMCS fields that describe one guest segment: selector, base, limit
 /// and access rights.
@@ -265,7 +276,7 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff:
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
     unsafe { predict(&cell) };
 
-    resume(&mut cell, &portal, vapic_addr);
+    resume(&mut cell, &portal, vapic_addr, space);
 
     cleanup(&cell);
     // SAFETY: `cell` is no longer current after `cleanup`, the precondition for
@@ -283,7 +294,7 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff:
 /// The run loop returns on every `VMCALL`, which is how the portal speaks to
 /// the host; each is answered, the instruction stepped over, and the guest
 /// resumed, until a notification ends the probe or the guest stops another way.
-fn resume(cell: &mut Vmcs, portal: &Portal, vapic_addr: Option<u64>) {
+fn resume(cell: &mut Vmcs, portal: &Portal, vapic_addr: Option<u64>, space: &AddressSpace) {
     let mut registers = Registers::default();
     let mut partition = Identity;
     let mut dumped = false;
@@ -320,7 +331,15 @@ fn resume(cell: &mut Vmcs, portal: &Portal, vapic_addr: Option<u64>) {
                     // the injection consults is readable and writable.
                     unsafe { drive_timer(cell, addr) };
                 }
-                if sample(cell, &mut last_rip, &mut same, &mut total, &mut logged) {
+                if sample(
+                    cell,
+                    space,
+                    &registers,
+                    &mut last_rip,
+                    &mut same,
+                    &mut total,
+                    &mut logged,
+                ) {
                     break;
                 }
             }
@@ -386,7 +405,11 @@ unsafe fn drive_timer(cell: &Vmcs, addr: u64) {
     if rflags & RFLAGS_INTERRUPT_ENABLE == 0 || interruptibility != 0 {
         return;
     }
-    let vector = u8::try_from(lvt & 0xFF).unwrap_or(0);
+    let vector = lvt & 0xFF;
+    if vector < MIN_DELIVERABLE_VECTOR {
+        return;
+    }
+    let vector = u8::try_from(vector).unwrap_or(0);
     let event = Interruption::inject(vector, vmx::event::Kind::External, false);
     // SAFETY: `cell` is current; the guest is interruptible, so an external
     // interrupt may be delivered on the next entry.
@@ -450,6 +473,8 @@ unsafe fn dump_vapic(addr: u64) {
 /// runs on forever.
 fn sample(
     cell: &Vmcs,
+    space: &AddressSpace,
+    registers: &Registers,
     last_rip: &mut u64,
     same: &mut u32,
     total: &mut u32,
@@ -465,6 +490,7 @@ fn sample(
             error!(
                 "vmxboot: the guest is spinning at rip {rip:#x} ({same} quanta without moving); stopping"
             );
+            spin_report(space, registers, rip);
             return true;
         }
     } else {
@@ -476,13 +502,62 @@ fn sample(
         }
     }
     if *total >= SAMPLE_BUDGET {
-        error!(
-            "vmxboot: sampled {total} quanta without a stop; last rip {:#x}",
-            *last_rip
-        );
+        error!("vmxboot: sampled {total} quanta without a stop; last rip {rip:#x}");
+        spin_report(space, registers, rip);
         return true;
     }
     false
+}
+
+/// Logs the register file and instruction bytes of a guest the sampler gave up
+/// on, so the loop it is turning can be decoded from the host side.
+///
+/// A guest alternating between a couple of instruction pointers is in a tight
+/// poll loop; the registers name what it is testing against and the bytes name
+/// how. Firmware runs its own identity paging, where a linear address is its
+/// physical address, so the instruction pointer doubles as the physical address
+/// the direct map reads the code back from. A pointer the direct map cannot
+/// reach, or one too high to be a physical address, is reported rather than
+/// followed.
+fn spin_report(space: &AddressSpace, registers: &Registers, rip: u64) {
+    info!(
+        "vmxboot: spin regs rax {:#x} rbx {:#x} rcx {:#x} rdx {:#x} rsi {:#x} rdi {:#x} rbp {:#x}",
+        registers.rax,
+        registers.rbx,
+        registers.rcx,
+        registers.rdx,
+        registers.rsi,
+        registers.rdi,
+        registers.rbp
+    );
+    info!(
+        "vmxboot: spin regs r8 {:#x} r9 {:#x} r10 {:#x} r11 {:#x} r12 {:#x} r13 {:#x} r14 {:#x} r15 {:#x}",
+        registers.r8,
+        registers.r9,
+        registers.r10,
+        registers.r11,
+        registers.r12,
+        registers.r13,
+        registers.r14,
+        registers.r15
+    );
+    let Ok(phys) = PhysAddr::try_new(rip) else {
+        warn!("vmxboot: spin rip {rip:#x} is not a physical address to read code from");
+        return;
+    };
+    let virt = match space.direct_map().reach(phys, SPIN_CODE_BYTES) {
+        Ok(virt) => virt,
+        Err(error) => {
+            warn!("vmxboot: could not reach the spin site at {rip:#x}: {error:?}");
+            return;
+        }
+    };
+    let len = usize::try_from(SPIN_CODE_BYTES).unwrap_or(0);
+    // SAFETY: the direct map reaches `SPIN_CODE_BYTES` bytes from `virt`, which
+    // lie in the RAM the guest is executing from; the bytes are only read, and
+    // the guest is not running during this exit, so nothing writes them.
+    let code = unsafe { core::slice::from_raw_parts(virt.as_u64() as *const u8, len) };
+    info!("vmxboot: spin code at {rip:#x}: {code:02x?}");
 }
 
 /// Answers one portal notification, stepping over its `VMCALL` and saying
