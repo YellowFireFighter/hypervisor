@@ -1,49 +1,44 @@
-//! A first attempt at running the captured firmware as an Intel VMX guest.
+//! Running the captured firmware as an Intel VMX guest, entered at the portal.
 //!
 //! The SVM path enters firmware as its first guest by copying the captured
-//! firmware state into a VMCB and running it behind nested paging. This does
-//! the Intel equivalent as far as it goes today: it enters VMX operation,
+//! firmware state into a VMCB, running it behind nested paging, and resuming it
+//! not where firmware stopped but at the portal — a page of citrine's own that
+//! starts the operating system's boot manager and replaces `ExitBootServices`
+//! with a wrapper, so the host learns the moment firmware's services end. This
+//! is the Intel equivalent as far as it goes today: it enters VMX operation,
 //! builds an extended page table that identity-maps all of physical memory,
-//! programs a VMCS from the same captured firmware state — reconciling the
-//! control registers against the bits VMX forces and converting each segment's
-//! attributes to the access-rights word a VMCS wants — and enters the guest,
-//! reporting exactly how the entry and the first exits went.
+//! programs a VMCS from the captured firmware state — reconciling the control
+//! registers against the bits VMX forces and converting each segment's packed
+//! attributes to the access-rights word a VMCS wants — resumes firmware at the
+//! portal, and answers the portal's notifications as the guest leaves firmware.
 //!
-//! It is a bring-up probe, not the finished backend. Firmware's captured
-//! instruction pointer is deliberately zero — the save area leaves it for
-//! whoever enters the guest to fill — so there is no portal to resume into yet;
-//! instead the guest begins at a one-instruction stub of citrine's own that
-//! calls straight back into the host. What that establishes is the hard,
-//! machine-specific core: whether firmware's real control registers, segments
-//! and descriptor tables pass the VM-entry consistency checks on this
-//! processor, and whether the world switch and the EPT carry firmware's own
-//! paging. Before the entry it checks the programmed state against the VM-entry
-//! rules itself, logging each one broken, because a processor that refuses a
-//! guest's state does not say which rule it failed; after a refusal it logs the
-//! state the processor rejected. That is what the next step — a full portal and
-//! guest memory — is built from.
+//! It is still a bring-up probe. The portal starts whatever boot manager the
+//! loader preloaded; built with none (the `no-guest` loader feature) its
+//! `StartImage` returns and the probe reports that rather than an OS running.
+//! The post-`ExitBootServices` VMX path — starting the other processors,
+//! concealing the portal, interposing on devices — is not built yet, so a guest
+//! that gets that far is reported and stopped. What this establishes is the
+//! hard, machine-specific core: that firmware's real state passes the VM-entry
+//! checks, that the world switch and the EPT carry firmware's own paging, and
+//! that firmware resumes into and runs citrine's own portal on an Intel
+//! machine. Before entry it checks the programmed state against the VM-entry
+//! rules and logs any it breaks; after a refusal it logs the rejected state.
 //!
 //! Two parts of firmware's state are adjusted on the way in, because VMX
 //! demands what AMD's world switch does not check: a null task register becomes
 //! a minimal busy 64-bit one, and every loaded code or data segment is marked
-//! accessed.
-//!
-//! Earlier runs proved VM entry and that the stub executes. This run lets
-//! firmware's own code run as the guest: the stub is entered with firmware's
-//! interrupts enabled, so the timer interrupt firmware's hardware keeps raising
-//! is delivered through firmware's own descriptor table and handled by
-//! firmware's handler, which returns to the stub's `VMCALL`. For that handler
-//! to run without stopping the guest, the guest must not exit on its `CR3`
-//! accesses — firmware saves `CR3` on every interrupt entry — so those exits
-//! are dropped where the processor's "true" capability registers permit it.
-//! Exits that remain unexplained still report the guest's position, and an
-//! intercepted exception or non-maskable interrupt its vector and cause.
+//! accessed. Firmware keeps its interrupts enabled, so its own handlers run as
+//! the guest, and the guest's `CR3` accesses are kept from exiting where the
+//! processor's "true" capability registers permit it, since firmware saves
+//! `CR3` on every interrupt entry.
 
 use alloc::{boxed::Box, vec::Vec};
 
 use ept::{ENTRIES, Memory};
-use log::{error, info};
+use handoff::Handoff;
+use log::{error, info, warn};
 use paging::AddressSpace;
+use portal::{Notification, Portal};
 use snapshot::FirmwareContext;
 use svm::{SaveArea, Segment, SegmentAttributes};
 use vmcs::{Registers, VmFail, Vmcs, controls, fixed, host, inspect, instr};
@@ -61,6 +56,11 @@ const GIB: u64 = 1 << 30;
 /// The limit of the smallest 64-bit task-state segment, which is what a guest
 /// given a task register of citrine's own is described with.
 const TSS_LIMIT: u32 = 0x67;
+
+/// The alignment the portal's stack is realigned to. Firmware was captured
+/// part-way through a call, so its stack pointer need not be aligned, and the
+/// portal makes calls of its own that the ABI requires a 16-byte stack for.
+const CALL_STACK_ALIGN: u64 = 16;
 
 /// The four VMCS fields that describe one guest segment: selector, base, limit
 /// and access rights.
@@ -120,22 +120,11 @@ impl Partition for Identity {
     }
 }
 
-/// A one-instruction guest: `VMCALL` straight back into the host, then halt.
-///
-/// Firmware's captured instruction pointer is zero, so the guest needs an entry
-/// point of citrine's own. This is the smallest one that produces a clean,
-/// recognizable exit: reaching the host through its `VMCALL` is proof the
-/// firmware state was entered and the first instruction fetched and run.
-#[unsafe(naked)]
-unsafe extern "C" fn firmware_stub() {
-    core::arch::naked_asm!("vmcall", "2:", "hlt", "jmp 2b");
-}
-
 /// Enters the captured firmware as a VMX guest and reports the outcome.
 ///
 /// Always returns, having logged how far it got; the caller halts afterward,
 /// because this is a probe and there is no guest loop to stay in yet.
-pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_ram: u64) {
+pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff: &Handoff) {
     info!("vmxboot: entering VMX to run the captured firmware as a guest");
 
     let mut vmxon = Page::zeroed();
@@ -172,7 +161,7 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
             }
         };
 
-    let gibibytes = usize::try_from(top_of_ram.div_ceil(GIB)).unwrap_or(usize::MAX);
+    let gibibytes = usize::try_from(handoff.top_of_ram.div_ceil(GIB)).unwrap_or(usize::MAX);
     let mut memory = EptFrames {
         frames: Vec::new(),
         space,
@@ -187,12 +176,15 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
     };
     info!("vmxboot: EPT identity-maps {gibibytes} GiB of physical memory");
 
-    let Ok(entry) = space.translate(VirtAddr::new((firmware_stub as *const ()).addr() as u64))
-    else {
-        error!("vmxboot: could not translate the guest entry stub");
-        cleanup(&cell);
-        return;
+    let portal = match Portal::place(space.direct_map(), handoff) {
+        Ok(portal) => portal,
+        Err(error) => {
+            error!("vmxboot: could not place the portal: {error}");
+            cleanup(&cell);
+            return;
+        }
     };
+    let entry = portal.entry();
 
     // SAFETY: `cell` is the current VMCS; host and control programming read this
     // processor's own state and the capability registers it has in VMX
@@ -203,6 +195,7 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
         host::program(&cell)
             .and_then(|()| controls::program(&cell, Some(eptp)))
             .and_then(|()| program_firmware(&cell, &firmware.cpu, entry.as_u64()))
+            .and_then(|()| cell.write(Field::GUEST_RSP, firmware.cpu.rsp & !(CALL_STACK_ALIGN - 1)))
     };
     if let Err(error) = programmed {
         error!("vmxboot: could not program the VMCS: {error}");
@@ -231,11 +224,7 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
     unsafe { predict(&cell) };
 
-    let mut registers = Registers::default();
-    // SAFETY: `cell` is the current, fully programmed VMCS, this processor is in
-    // VMX operation, and bring-up installed the general-protection vector.
-    let outcome = unsafe { vmexits::run(&mut cell, &mut registers, &mut Identity) };
-    report(&cell, outcome);
+    resume(&mut cell, &portal);
 
     cleanup(&cell);
     // SAFETY: `cell` is no longer current after `cleanup`, the precondition for
@@ -245,6 +234,117 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
     // are dropped only now.
     drop(memory);
     info!("vmxboot: probe complete");
+}
+
+/// Drives the firmware guest from the portal, answering each notification until
+/// it leaves firmware or stops.
+///
+/// The run loop returns on every `VMCALL`, which is how the portal speaks to
+/// the host; each is answered, the instruction stepped over, and the guest
+/// resumed, until a notification ends the probe or the guest stops another way.
+fn resume(cell: &mut Vmcs, portal: &Portal) {
+    let mut registers = Registers::default();
+    let mut partition = Identity;
+    loop {
+        // SAFETY: `cell` is the current, fully programmed VMCS, this processor
+        // is in VMX operation, and bring-up installed the general-protection
+        // vector the forwarding relies on; the loop preserves that each entry.
+        match unsafe { vmexits::run(cell, &mut registers, &mut partition) } {
+            Exit::Vmcall => {
+                if !notified(cell, &registers, portal) {
+                    break;
+                }
+            }
+            outcome @ Exit::Stopped(_) => {
+                report(cell, outcome);
+                break;
+            }
+        }
+    }
+}
+
+/// Answers one portal notification, stepping over its `VMCALL` and saying
+/// whether the guest should be resumed.
+///
+/// The notification is in the guest's `RDX` and any status it carries in `RAX`,
+/// exactly as the portal left them.
+fn notified(cell: &Vmcs, registers: &Registers, portal: &Portal) -> bool {
+    let marker = registers.rdx;
+    let status = registers.rax;
+    let keep_going = match Notification::from_bits(marker) {
+        Some(Notification::LoaderUnloaded) => loader(portal, true, status),
+        Some(Notification::LoaderSkipped) => loader(portal, false, status),
+        Some(Notification::ExitSucceeded) => {
+            exit_succeeded(portal);
+            false
+        }
+        Some(Notification::StartReturned) => {
+            error!(
+                "vmxboot: firmware StartImage returned status {status:#x}; no boot manager was preloaded to run"
+            );
+            false
+        }
+        None => {
+            error!("vmxboot: the guest issued VMCALL with an unknown marker {marker:#x}");
+            false
+        }
+    };
+    if !keep_going {
+        return false;
+    }
+    // SAFETY: `cell` is current; the exit was on the portal's VMCALL, whose
+    // length the processor recorded, so stepping past it is sound.
+    match unsafe { cell.advance_past_instruction() } {
+        Ok(()) => true,
+        Err(error) => {
+            error!("vmxboot: could not step past the portal VMCALL: {error}");
+            false
+        }
+    }
+}
+
+/// Handles the first `ExitBootServices` hook: wipes the loader when firmware
+/// released its image, records which way it went, and resumes the guest.
+fn loader(portal: &Portal, unloaded: bool, status: u64) -> bool {
+    let wiped = if unloaded {
+        match portal.wipe_loader() {
+            Ok(()) => {
+                info!("vmxboot: hv-loader image unloaded and wiped");
+                true
+            }
+            Err(error) => {
+                warn!("vmxboot: hv-loader was unloaded but could not be wiped: {error}");
+                false
+            }
+        }
+    } else {
+        warn!("vmxboot: firmware rejected hv-loader UnloadImage with status {status:#x}");
+        false
+    };
+    let transition = if wiped {
+        portal.mark_loader_handled()
+    } else {
+        portal.mark_loader_skipped()
+    };
+    if let Err(error) = transition {
+        error!("vmxboot: could not publish the loader state: {error}");
+        return false;
+    }
+    true
+}
+
+/// Handles firmware's successful `ExitBootServices`: restores the boot-services
+/// table and reports that the VMX path past firmware is not built yet.
+fn exit_succeeded(portal: &Portal) {
+    match portal.restore_boot_services() {
+        Ok(()) => {
+            info!("vmxboot: firmware ExitBootServices succeeded; boot-services table restored");
+        }
+        Err(error) => error!("vmxboot: could not restore the boot-services table: {error}"),
+    }
+    error!(
+        "vmxboot: firmware's services are gone, but the VMX path past ExitBootServices (starting the other processors, concealing the portal, interposing on devices) is not built yet; halting"
+    );
 }
 
 /// Programs the guest half of the current VMCS from a captured firmware save

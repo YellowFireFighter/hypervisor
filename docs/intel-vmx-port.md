@@ -45,10 +45,17 @@ self-test battery passing in full. The checks, by area:
 - **Event injection:** an exception, and one carrying an error code, injected
   through a guest's own IDT and delivered to its handler.
 
-Written, and awaiting the next hardware run: the first APICv slice — the TPR
-shadow virtualizing `CR8` to the virtual-APIC page without an exit, and the TPR
-threshold taking the exit when the shadow drops below it — each with a self-test
-check, unverified until it runs on Intel.
+The first APICv slice has now run on Intel. The TPR shadow (virtualizing `CR8`
+to the virtual-APIC page without an exit) and the TPR threshold (taking the exit
+when the shadow drops below it) both pass. The fuller APICv checks written
+alongside them — the APIC-access page exiting, APIC-register virtualization
+reading from the virtual-APIC page, and virtual-interrupt delivery — fail on
+hardware: they are set up without a second translation, which real APIC
+virtualization needs, and virtual-interrupt delivery needs its own control and
+guest-interrupt-status setup besides. They are deferred: a guest runs on the
+physical APIC through the identity EPT without any of them, so none is on the
+path to booting a guest, and getting them right is its own effort to be done
+when an OS needs interrupt virtualization, not before.
 
 The firmware-guest entry probe (the `vmx-boot` feature, in `hv-core`'s
 `vmxboot` module) has had one hardware run. On the Intel branch of bring-up it

@@ -95,7 +95,7 @@ vmx-selftest = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits", "dep:hypercall"
 # VMCS from the firmware save area, enters the guest, and reports how the entry
 # and the first exits went, then halts. For bringing the Intel guest path up on
 # real hardware; off in every ordinary build.
-vmx-boot = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits"]
+vmx-boot = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits", "portal/vmx"]
 
 [lints]
 workspace = true
