@@ -227,23 +227,69 @@ impl Canvas {
         }
     }
 
-    /// Moves every row of the grid up one and blanks the freed bottom row,
-    /// redrawing only the cells whose character changed.
+    /// Moves every row of the grid up one, blanks the freed bottom row, and
+    /// repaints the screen from the grid.
     ///
-    /// Row `row` takes what row `row + 1` held before it is itself moved, so a
-    /// single top-down pass is enough.
+    /// Scrolling shifts the whole picture up a cell, so nearly every pixel
+    /// changes; the repaint writes them in strictly ascending framebuffer
+    /// address order (see [`repaint`](Self::repaint)), which the one before it
+    /// did not. On the write-combining memory a frame buffer is, ascending
+    /// writes coalesce into bursts, where the scattered sixteen-pixel runs a
+    /// per-cell redraw emitted did not and cost an order of magnitude more.
     fn scroll(&self, pixels: &mut [u8], grid: &mut Text) {
         let rows = self.rows();
         for row in 0..rows {
             for column in 0..self.columns() {
-                let incoming = if row + 1 < rows {
+                grid.cells[row][column] = if row + 1 < rows {
                     grid.cells[row + 1][column]
                 } else {
                     BLANK
                 };
-                if grid.cells[row][column] != incoming {
-                    grid.cells[row][column] = incoming;
-                    self.draw(pixels, &Cursor { column, row }, incoming);
+            }
+        }
+        self.repaint(pixels, grid);
+    }
+
+    /// Repaints the whole screen from the grid, one scan line at a time from
+    /// top to bottom.
+    ///
+    /// Each scan line's pixels are composed once into a buffer in ordinary
+    /// cached memory and then copied to the frame buffer in a single
+    /// [`copy_from_slice`](slice::copy_from_slice) — a `memcpy`, which the
+    /// frame buffer's write-combining memory turns into burst writes. The
+    /// scattered sixteen-pixel runs a per-cell redraw emitted left that
+    /// memory's few fill buffers thrashing, and cost an order of magnitude
+    /// more. Because the `SCALE` scan lines a glyph row covers are
+    /// identical, the buffer is built once per glyph row and copied to
+    /// each.
+    fn repaint(&self, pixels: &mut [u8], grid: &Text) {
+        let ink = u32::from_ne_bytes(self.channels.encode(FOREGROUND));
+        let blank = u32::from_ne_bytes(self.channels.encode(BACKGROUND));
+        let stride = self.pitch_bytes() / Framebuffer::BYTES_PER_PIXEL as usize;
+        let columns = self.columns();
+        let width = columns * CELL_WIDTH;
+        // SAFETY: the frame buffer begins on a page boundary and its pitch is a
+        // whole number of pixels, so the bytes are aligned for `u32` and the
+        // prefix is empty; every bit pattern is a valid `u32`, and these bytes
+        // are initialized device memory this writer owns for the call.
+        let (_, words, _) = unsafe { pixels.align_to_mut::<u32>() };
+        let mut line = [blank; MAX_COLUMNS * CELL_WIDTH];
+        for cell_row in 0..self.rows() {
+            for font_row in 0..GLYPH_HEIGHT {
+                for cell_column in 0..columns {
+                    let glyph = BASIC_LEGACY[usize::from(grid.cells[cell_row][cell_column])];
+                    let bits = glyph[font_row];
+                    let origin = cell_column * CELL_WIDTH;
+                    for bit in 0..GLYPH_WIDTH {
+                        let colour = if bits & (1 << bit) != 0 { ink } else { blank };
+                        let pixel = origin + bit * SCALE;
+                        line[pixel..pixel + SCALE].fill(colour);
+                    }
+                }
+                for dy in 0..SCALE {
+                    let y = cell_row * CELL_HEIGHT + font_row * SCALE + dy;
+                    let start = y * stride;
+                    words[start..start + width].copy_from_slice(&line[..width]);
                 }
             }
         }
@@ -575,28 +621,37 @@ mod tests {
     }
 
     #[test]
-    fn a_scroll_redraws_only_the_cells_whose_character_changed() {
+    fn a_scroll_shifts_the_grid_up_and_repaints_from_it() {
+        // A glyph in the grid's bottom row, present nowhere in the pixels: a
+        // scroll moves it up a row in the grid, blanks the freed bottom row,
+        // and repaints the whole screen from the grid — so the glyph that was
+        // only recorded appears one cell-row up and the old bottom row clears.
         let canvas = small_canvas();
         let mut pixels = vec![0; small_pixels().len()];
         let mut grid = grid();
-        let mut cursor = Cursor::default();
-        // The same character in the same column of both rows: scrolling moves
-        // nothing a reader could see, so the cell must not be touched.
-        canvas.write_str(&mut pixels, &mut cursor, Some(&mut grid), "#\n#");
-        // Mark the top cell's background; a redraw would paint over the mark.
-        let marked = usize::try_from(canvas.pitch).expect("pitch fits") * (CELL_HEIGHT - 1);
-        pixels[marked] = 0x55;
+        let last_row = canvas.rows() - 1;
+        grid.cells[last_row][0] = b'#';
+        // The cursor on the last row, so the newline below scrolls.
+        let mut cursor = Cursor {
+            column: 0,
+            row: last_row,
+        };
 
         canvas.newline(&mut pixels, &mut cursor, Some(&mut grid));
 
-        assert_eq!(pixels[marked], 0x55, "an unchanged cell was redrawn");
-        // The bottom cell, which held a character and now holds none, was
-        // redrawn as background.
-        let bottom = inked(&pixels)
-            .into_iter()
-            .filter(|(_, y)| *y >= CELL_HEIGHT)
-            .count();
-        assert_eq!(bottom, 0);
+        assert_eq!(cursor.row, last_row);
+        assert_eq!(
+            grid.cells[last_row - 1][0],
+            b'#',
+            "the grid did not shift up"
+        );
+        assert_eq!(grid.cells[last_row][0], 0, "the freed row is not blank");
+        let lit = inked(&pixels);
+        assert!(!lit.is_empty(), "the repaint drew nothing from the grid");
+        assert!(
+            lit.iter().all(|(_, y)| *y < CELL_HEIGHT),
+            "the glyph was not repainted one row up"
+        );
     }
 
     #[test]
