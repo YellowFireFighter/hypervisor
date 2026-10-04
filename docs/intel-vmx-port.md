@@ -84,13 +84,18 @@ Remaining, roughly in order:
 2. **APICv** (the `svm::avic` / `vlapic` AVIC counterpart). The TPR shadow is
    the first slice; what remains is the APIC-access page, APIC-register
    virtualization, virtual-interrupt delivery, and posted interrupts.
-3. **Vendor selection in `hv-core`.** Detect AMD (`CPUID 0x8000000A`) versus
-   Intel (`CPUID.1:ECX.VMX`) at boot and drive the SVM (`svm`/`vcpu`/`npt`/
-   `exits`) or VMX (`vmx`/`vmcs`/`ept`/`vmexits`) backend behind a shared
-   interface. Today `bring_up` is hardcoded to SVM; this is the refactor that
-   makes one image run on either, and the largest remaining piece. Unlike the
-   mechanisms above, finishing it is validated by booting a real guest on an
-   Intel machine, not by the self-test battery.
+3. **Vendor selection in `hv-core`.** The detection and the selection seam are
+   in place: `processor::vendor()` reads the vendor string and `bring_up`
+   branches on it, so the image chooses the SVM (`svm`/`vcpu`/`npt`/`exits`) or
+   VMX (`vmx`/`vmcs`/`ept`/`vmexits`) backend rather than assuming SVM. Today the
+   AMD branch is the whole guest path and the Intel branch stops with a report
+   (`CoreError::IntelBackendNotWired`) instead of faulting on the first SVM
+   instruction. What remains is the VMX guest path the Intel branch would take:
+   a partition-equivalent that owns the guest's EPT and memory, the run loop
+   driving `vmexits::dispatch`, the portal, SMP bring-up, and device
+   interposition — the VMX counterparts of what `exits`/`partition`/`portal`
+   give the SVM side. Unlike the mechanisms above, finishing it is validated by
+   booting a real guest on an Intel machine, not by the self-test battery.
 
 ## Gotchas learned the hard way
 
