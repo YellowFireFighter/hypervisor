@@ -17,6 +17,24 @@
 
 use bitfield_struct::bitfield;
 
+/// The type bit a code or data segment's descriptor sets once it has been
+/// loaded.
+pub const TYPE_ACCESSED: u8 = 1 << 0;
+/// The type bit that makes a data segment writable or a code segment readable.
+pub const TYPE_READ_WRITE: u8 = 1 << 1;
+/// The type bit that makes a code segment conforming, or a data segment
+/// expand-down.
+pub const TYPE_CONFORMING: u8 = 1 << 2;
+/// The type bit that makes a segment code rather than data.
+pub const TYPE_CODE: u8 = 1 << 3;
+/// The system-segment type of a local descriptor table.
+pub const LDT_TYPE: u8 = 0x2;
+/// The system-segment type of a busy 16-bit task-state segment.
+pub const BUSY_TSS_16_TYPE: u8 = 0x3;
+/// The system-segment type of a busy 32- or 64-bit task-state segment, the
+/// only task register a 64-bit guest may enter with.
+pub const BUSY_TSS_TYPE: u8 = 0xB;
+
 /// A guest segment's access-rights doubleword, as the VMCS lays it out.
 ///
 /// The reserved runs — bits 11:8 and 31:17 — are unnamed bitfield members, so

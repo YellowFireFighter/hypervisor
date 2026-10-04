@@ -46,6 +46,8 @@
 //! - [`exit`] is why a guest stopped, and [`event`] is what is handed to it on
 //!   the way back in.
 //! - [`segment`] is the access-rights word each guest segment is described by.
+//! - [`check`] restates the guest-state checks a VM entry applies, so a refused
+//!   entry can be explained.
 //! - [`region`] is the one doubleword software sets in a VMXON region or VMCS.
 //! - [`ept`] is the extended-page-table entry and pointer format, Intel's
 //!   second translation — the counterpart to the `npt` crate's entries.
@@ -53,6 +55,7 @@
 #![no_std]
 
 pub mod basic;
+pub mod check;
 pub mod control;
 pub mod ept;
 pub mod event;
