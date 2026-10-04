@@ -113,12 +113,27 @@ firmware's IDT to firmware's handler, which returns to the stub's `VMCALL`; and
 the guest's `CR3` accesses stop exiting (`vmcs::controls::relax_cr3_exiting`,
 using the true capability registers) so the handler's control-register saves
 do not stop it. Unverified until it runs: the expected outcome is still the
-`VMCALL`, now reached only after firmware's handler has executed. The portal
-path proper — the Intel portal blob (`vmcall` for AMD's `vmmcall`), a VMX
-partition owning the firmware guest's full EPT and memory, interrupt and `CR3`
-handling for a guest that is no longer a stub, SMP bring-up and the
-`ExitBootServices` handoff — remains the larger next effort, built on this
-once firmware-runs is confirmed.
+`VMCALL`, now reached only after firmware's handler has executed.
+
+The portal path has since been wired on the Intel side, replacing the stub. The
+portal blob emits `vmcall` under the `portal` crate's `vmx` feature; the probe
+places the portal, programs the VMCS from firmware state with the portal as the
+entry and firmware's stack realigned for the calls it makes, resumes firmware
+there behind the identity EPT, and answers the portal's notifications
+(`LoaderUnloaded`, `LoaderSkipped`, `ExitSucceeded`, `StartReturned`) as the
+guest leaves firmware. Built with `no-guest`, no boot manager is preloaded, so
+the portal's `StartImage` is called on the loader's own already-started handle,
+which firmware rejects — the probe reports the returned status. Reaching that
+report proves the Intel portal ran: it patched firmware's live boot-services
+table, recomputed its CRC through firmware's own `CalculateCrc32`, and called
+firmware's `StartImage`, all as the VMX guest. Unverified until it runs on
+hardware.
+
+What remains to boot a real guest: building without `no-guest` so the loader
+preloads the operating system's boot manager for `StartImage` to launch, and
+the VMX path past `ExitBootServices` — a partition owning the guest's full EPT
+and memory, SMP bring-up, portal concealment, and device interposition — the
+counterparts of what `partition`/`portal`/`exits` give the SVM side.
 
 ## Running the self-test on Intel hardware
 
