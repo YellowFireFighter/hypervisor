@@ -84,6 +84,18 @@ Running firmware itself (rather than the stub) will need its interrupts
 delivered and its `CR3` accesses either not exiting (the TRUE controls, where
 `IA32_VMX_BASIC` bit 55 offers them) or emulated.
 
+On the third run **the stub reached its `VMCALL`**: VM entry, the world switch
+and the identity EPT carry the captured firmware state on real Intel hardware,
+and the stub, which lives in the hypervisor's chunk, executes under firmware's
+own page tables. Firmware's captured `RFLAGS` was `0x206`, so interrupts were
+enabled, which confirms the second run's exit as firmware's pending timer
+interrupt being delivered through firmware's IDT. This is the first milestone
+of the guest path. The next is resuming firmware itself rather than a stub,
+which on this side still lacks: the portal's host calls (the portal is written
+with AMD's `VMMCALL`, which faults on Intel), a guest whose interrupts and `CR3`
+accesses are handled, and the partition and `ExitBootServices` handoff the SVM
+side builds in `partition` and `portal`.
+
 ## Running the self-test on Intel hardware
 
 1. Build with the on-screen log and the self-test:
