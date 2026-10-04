@@ -47,14 +47,20 @@
 
 #![no_std]
 
+pub mod controls;
 pub mod enable;
 pub mod error;
 pub mod fixed;
+pub mod guest;
+pub mod host;
 pub mod instr;
+mod msr;
+pub mod run;
 pub mod vmcs;
 
 pub use crate::{
     enable::{Vmx, enter},
     error::{EnterError, Outcome, VmFail},
+    run::{Entered, Registers},
     vmcs::Vmcs,
 };

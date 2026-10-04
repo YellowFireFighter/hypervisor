@@ -34,6 +34,7 @@ use crate::{
         self, IA32_VMX_CR0_FIXED0, IA32_VMX_CR0_FIXED1, IA32_VMX_CR4_FIXED0, IA32_VMX_CR4_FIXED1,
     },
     instr,
+    msr::rdmsr,
 };
 
 /// Proof that the calling processor is in VMX operation.
@@ -62,17 +63,6 @@ impl Vmx {
     pub const fn region(&self) -> PhysAddr {
         self.region
     }
-}
-
-/// Reads a model-specific register.
-///
-/// # Safety
-///
-/// `number` must be a register this processor implements.
-unsafe fn rdmsr(number: u32) -> u64 {
-    // SAFETY: the caller guarantees the register exists; a plain read has no
-    // other precondition.
-    unsafe { Msr::new(number).read() }
 }
 
 /// Puts the calling processor into VMX operation, using the VMXON region whose
