@@ -69,6 +69,21 @@ the next run: a null firmware task register becomes a minimal busy 64-bit one
 (VMX requires a usable TSS; AMD's world switch does not check), and every
 loaded code or data segment is marked accessed.
 
+On the second run both adjustments held: the guest state passed every
+restated check and **VM entry with real firmware state succeeded**. The guest
+then exited on a read of `CR3` (`MOV RAX, CR3`; CR3-store exiting is forced on
+by the non-TRUE capability register) — not an instruction of the stub, but the
+sequence firmware's common exception and interrupt entry uses to save the
+control registers. So an event was delivered through firmware's IDT before the
+stub ran: most likely the firmware timer interrupt left pending while the host
+ran with interrupts off, possibly a fault fetching the stub. The probe now
+enters the stub with `RFLAGS.IF` clear and intercepts every exception, and
+logs the guest's `RIP`/`RSP`/`RFLAGS` on any stop and the vector, error code
+and qualification of an intercepted exception; unverified until the next run.
+Running firmware itself (rather than the stub) will need its interrupts
+delivered and its `CR3` accesses either not exiting (the TRUE controls, where
+`IA32_VMX_BASIC` bit 55 offers them) or emulated.
+
 ## Running the self-test on Intel hardware
 
 1. Build with the on-screen log and the self-test:
