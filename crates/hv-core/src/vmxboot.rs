@@ -20,6 +20,11 @@
 //! paging. When entry is refused it names the instruction error the processor
 //! gave, which is what the next step — a full portal and guest memory — is
 //! built from.
+//!
+//! Two parts of firmware's state are adjusted on the way in, because VMX
+//! demands what AMD's world switch does not check: a null task register becomes
+//! a minimal busy 64-bit one, and every loaded code or data segment is marked
+//! accessed.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -27,14 +32,21 @@ use ept::{ENTRIES, Memory};
 use log::{error, info};
 use paging::AddressSpace;
 use snapshot::FirmwareContext;
-use svm::{SaveArea, Segment};
+use svm::{SaveArea, Segment, SegmentAttributes};
 use vmcs::{Registers, VmFail, Vmcs, controls, fixed, host, instr};
 use vmexits::{Exit, Partition, Stop};
-use vmx::{AccessRights, EptEntry, Field, FieldEncoding, PAGE_BYTES};
+use vmx::{
+    AccessRights, EptEntry, Field, FieldEncoding, PAGE_BYTES,
+    segment::{BUSY_TSS_TYPE, TYPE_ACCESSED},
+};
 use x86_64::VirtAddr;
 
 /// Bytes in a gibibyte, the unit the EPT identity map is sized in.
 const GIB: u64 = 1 << 30;
+
+/// The limit of the smallest 64-bit task-state segment, which is what a guest
+/// given a task register of citrine's own is described with.
+const TSS_LIMIT: u32 = 0x67;
 
 /// The four VMCS fields that describe one guest segment: selector, base, limit
 /// and access rights.
@@ -329,7 +341,7 @@ unsafe fn program_segments(cell: &Vmcs, save: &SaveArea) -> Result<(), VmFail> {
                 Field::GUEST_TR_LIMIT,
                 Field::GUEST_TR_ACCESS_RIGHTS,
             ),
-            &save.tr,
+            &task_register(&save.tr),
         ),
     ];
     for (fields, segment) in segments {
@@ -337,6 +349,31 @@ unsafe fn program_segments(cell: &Vmcs, save: &SaveArea) -> Result<(), VmFail> {
         unsafe { write_segment(cell, fields, segment)? };
     }
     Ok(())
+}
+
+/// The task register the guest enters with.
+///
+/// A 64-bit VM entry insists on a usable, busy 64-bit task-state segment, but
+/// firmware need never load one: code running at ring 0 with no
+/// interrupt-stack-table entries never consults it, and the AMD world switch
+/// does not check, so the captured task register can be null. When it is, the
+/// guest gets the task register a processor holds out of reset — selector and
+/// base zero — typed as the busy 64-bit segment long mode requires and given
+/// the smallest limit such a segment has. Firmware never reads through it, and
+/// an operating system loads its own before anything could. A task register
+/// firmware did load is kept as it was.
+fn task_register(captured: &Segment) -> Segment {
+    if captured.attributes.present() {
+        return *captured;
+    }
+    Segment {
+        selector: captured.selector,
+        attributes: SegmentAttributes::new()
+            .with_kind(BUSY_TSS_TYPE)
+            .with_present(true),
+        limit: TSS_LIMIT,
+        base: 0,
+    }
 }
 
 /// Groups a segment's four field encodings, so a caller names each segment
@@ -379,13 +416,24 @@ unsafe fn write_segment(
 /// bit the save area signals instead by clearing the present bit. Rebuilding
 /// the word field by field, rather than shifting bits, keeps the two layouts
 /// from ever being confused.
+///
+/// A loaded code or data segment is always marked accessed: loading it sets
+/// the bit, and VM entry refuses one without it. The captured attributes come
+/// from the descriptor in firmware's table rather than from the processor, so
+/// a table rewritten after the load can have lost the bit the segment
+/// register still carries.
 fn access_rights(segment: &Segment) -> u64 {
     let attributes = segment.attributes;
     if !attributes.present() {
         return u64::from(AccessRights::new().with_unusable(true).into_bits());
     }
+    let kind = if attributes.descriptor() {
+        attributes.kind() | TYPE_ACCESSED
+    } else {
+        attributes.kind()
+    };
     let rights = AccessRights::new()
-        .with_kind(attributes.kind())
+        .with_kind(kind)
         .with_descriptor(attributes.descriptor())
         .with_dpl(attributes.dpl())
         .with_present(true)
