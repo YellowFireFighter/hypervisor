@@ -116,12 +116,17 @@ pub fn identity(memory: &mut impl Memory, gibibytes: usize) -> Result<EptPointer
         }
     }
 
-    Ok(EptPointer::new(
-        pml4,
-        EptMemoryType::WriteBack,
-        WALK_LENGTH,
-        false,
-    ))
+    Ok(pointer(pml4))
+}
+
+/// The EPT pointer naming `root` as the top-level structure, with the standard
+/// four-level walk and write-back paging, ready to install in a VMCS.
+///
+/// [`identity`] returns its own pointer; this is for a tree assembled with
+/// [`map`], whose caller allocated the root and holds its address.
+#[must_use]
+pub fn pointer(root: u64) -> EptPointer {
+    EptPointer::new(root, EptMemoryType::WriteBack, WALK_LENGTH, false)
 }
 
 /// Maps the 4-KiB guest-physical page at `guest_physical` to the host frame at
