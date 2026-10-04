@@ -205,6 +205,10 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
         inject_probe(cell, 13, true),
     );
     check(
+        "a guest VMX instruction is refused with #UD",
+        vmx_refuse_probe(cell),
+    );
+    check(
         "control-register access decoded from its qualification",
         cr_access_probe(cell),
     );
@@ -1172,6 +1176,63 @@ fn inject_probe(cell: &mut Vmcs, vector: u8, error_code: bool) -> bool {
     if !ok {
         error!(
             "vmx: injection vector {vector}: reached {reached}, marker {:#x}",
+            registers.r8
+        );
+    }
+    drop((idt, stack));
+    ok
+}
+
+/// A guest whose first instruction is `VMXOFF`, a VMX instruction that exits to
+/// the host in non-root operation.
+///
+/// Its own code past the `VMXOFF` never runs: the dispatch refuses the
+/// instruction with `#UD`, which the guest's IDT vectors to [`inject_handler`].
+#[unsafe(naked)]
+unsafe extern "C" fn guest_vmxoff() {
+    core::arch::naked_asm!("vmxoff", "2:", "hlt", "jmp 2b");
+}
+
+/// Runs a guest that executes `VMXOFF` and checks the dispatch refused it with
+/// an invalid-opcode exception delivered through the guest's own IDT.
+///
+/// The guest owns an IDT whose invalid-opcode gate points at
+/// [`inject_handler`], which records [`INJECT_MARKER`] and `VMCALL`s; reaching
+/// it is the whole of the proof, since the only path there is the dispatch
+/// injecting `#UD` for the refused instruction. The guest runs in the host's
+/// address space with no second translation, so its IDT, the handler and the
+/// interrupt stack are all reachable directly.
+fn vmx_refuse_probe(cell: &mut Vmcs) -> bool {
+    let mut idt = Page::zeroed();
+    let stack = Page::zeroed();
+    let handler = (inject_handler as *const ()).addr() as u64;
+    write_gate(&mut idt, 6, handler, CS::get_reg().0);
+    let idt_base = core::ptr::from_ref(&idt.0).addr() as u64;
+
+    let rip = (guest_vmxoff as *const ()).addr() as u64;
+    let rsp = core::ptr::from_ref(&stack.0).addr() as u64 + PAGE_BYTES as u64;
+
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // shares the host address space with no EPT, so `rip`, the IDT at
+    // `idt_base` and `rsp` are all host-mapped, and the invalid-opcode gate is
+    // present.
+    let programmed = unsafe {
+        program_guest(cell, None, rip, rsp)
+            .and_then(|()| cell.write(Field::GUEST_IDTR_BASE, idt_base))
+            .and_then(|()| cell.write(Field::GUEST_IDTR_LIMIT, 0xFFF))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: VMX-refuse programming failed: {error}");
+        drop((idt, stack));
+        return false;
+    }
+
+    let mut registers = Registers::default();
+    let reached = drive_dispatch(cell, &mut registers);
+    let ok = reached && registers.r8 == INJECT_MARKER;
+    if !ok {
+        error!(
+            "vmx: VMX refuse: reached {reached}, marker {:#x}",
             registers.r8
         );
     }

@@ -26,6 +26,10 @@
 //!   qualification and reported. Neither has a handler yet — a guest's own
 //!   memory and control-register virtualization are later layers — so each
 //!   stops the guest with the decoded reason rather than resuming blindly.
+//! - The VMX instructions, which a guest told it has no virtualization
+//!   extension must not find working: each is refused with an invalid-opcode
+//!   exception delivered through the guest's own descriptor table, the
+//!   counterpart to the AMD side's refusal of SVM instructions.
 //!
 //! Anything else stops the guest too. A hypervisor that resumed an exit it did
 //! not understand would resume a guest whose state it had not fixed, and the
@@ -43,6 +47,7 @@
 
 #![no_std]
 
+mod conceal;
 pub mod control_register;
 mod cpuid;
 mod msr;
@@ -177,6 +182,26 @@ pub unsafe fn dispatch(cell: &Vmcs, registers: &mut Registers) -> Flow {
                 Ok(bits) => Flow::Stop(Stop::ControlRegister(control_register::Access::decode(
                     bits,
                 ))),
+                Err(fail) => Flow::Stop(Stop::Vmcs(fail)),
+            }
+        }
+        BasicExitReason::VMCLEAR
+        | BasicExitReason::VMLAUNCH
+        | BasicExitReason::VMPTRLD
+        | BasicExitReason::VMPTRST
+        | BasicExitReason::VMREAD
+        | BasicExitReason::VMRESUME
+        | BasicExitReason::VMWRITE
+        | BasicExitReason::VMXOFF
+        | BasicExitReason::VMXON
+        | BasicExitReason::INVEPT
+        | BasicExitReason::INVVPID
+        | BasicExitReason::VMFUNC => {
+            // SAFETY: `cell` is current; the guest ran a VMX instruction, which
+            // it has been told does not exist, so it is given the fault it
+            // would take on a processor without the extension.
+            match unsafe { conceal::refuse(cell) } {
+                Ok(()) => Flow::Resume,
                 Err(fail) => Flow::Stop(Stop::Vmcs(fail)),
             }
         }
