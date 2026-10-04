@@ -69,20 +69,31 @@ const X2APIC_ENABLE: u64 = 1 << 10;
 const CALL_STACK_ALIGN: u64 = 16;
 
 /// How long the preemption timer runs before forcing an exit, in the units the
-/// processor counts it in. Short enough to sample a spin promptly, long enough
-/// that a guest making progress runs meaningfully between samples.
-const PREEMPTION_QUANTUM: u32 = 0x1000;
+/// processor counts it in. Long, so a guest making progress runs a substantial
+/// stretch between forced exits rather than being sampled to a crawl: the
+/// forced exit is only a backstop against a guest that would otherwise never
+/// exit, and firmware running its boot manager needs real runtime to get
+/// anywhere. A guest that is genuinely stuck still exits here and is caught.
+const PREEMPTION_QUANTUM: u32 = 0x40_0000;
 
 /// How many quanta the guest may sit at one instruction pointer before it is
 /// declared stuck there.
 const SPIN_THRESHOLD: u32 = 1000;
 
-/// The most preemption quanta the probe samples before stopping regardless.
-const SAMPLE_BUDGET: u32 = 1500;
+/// The most preemption quanta the probe lets the guest run before stopping
+/// regardless. High, because reaching the boot manager's `ExitBootServices` is
+/// the goal and firmware takes real time to get there; this is only a backstop
+/// so a guest looping over many addresses forever still halts with a report
+/// rather than requiring the machine to be power-cycled.
+const SAMPLE_BUDGET: u32 = 100_000;
 
 /// The most distinct instruction pointers the sampler logs, so a guest making
 /// steady progress does not flood the log.
 const SAMPLE_LOG_LIMIT: u32 = 24;
+
+/// How often, in preemption quanta, to log a heartbeat once the distinct-rip
+/// log is full, so a long run shows it is still progressing and where.
+const HEARTBEAT_QUANTA: u32 = 1000;
 
 /// Bit 16 of a local-vector-table entry: the interrupt is masked.
 const LVT_MASKED: u32 = 1 << 16;
@@ -500,6 +511,9 @@ fn sample(
             info!("vmxboot: guest running at rip {rip:#x} (quantum {total})");
             *logged += 1;
         }
+    }
+    if *logged >= SAMPLE_LOG_LIMIT && total.is_multiple_of(HEARTBEAT_QUANTA) {
+        info!("vmxboot: still running at rip {rip:#x} after {total} quanta");
     }
     if *total >= SAMPLE_BUDGET {
         error!("vmxboot: sampled {total} quanta without a stop; last rip {rip:#x}");
