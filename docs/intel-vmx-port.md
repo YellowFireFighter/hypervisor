@@ -13,7 +13,7 @@ done, how it is tested, and what remains.
 | `vmx` | Definitions only: VMCS field encodings, pin/proc/exit/entry control bits + capability reconciliation, exit reasons, event-injection format, segment access-rights, VMXON/VMCS region headers, EPT entry and pointer formats, `IA32_VMX_BASIC`, VMX support + feature-control decoding. No `unsafe`, no hardware. | `svm` |
 | `ept` | EPT tree builder over a `Memory` trait: `identity()` (2-MiB large-page identity map) and `map()` (one 4-KiB page). | `npt` |
 | `vmcs` | Executable layer: `enable` (`VMXON`), `instr` (instruction wrappers), `vmcs` (VMCS lifecycle + typed field access), `run` (the `VMLAUNCH`/`VMRESUME` world switch), `host`/`guest`/`controls` (VMCS state programming), `fixed` (CR0/CR4 fixed-bit reconcile), `error` (`Outcome`/`VmFail`). | `vcpu` |
-| `vmexits` | Exit dispatch: `dispatch()` answers each exit and returns `Flow` (resume / vmcall / stop). Handles `CPUID` (forward the machine's answer), `RDMSR`/`WRMSR` (forward through `probe`), `HLT`, `VMCALL`, triple fault; decodes the control-register and EPT-violation exit qualifications (`control_register`, `violation`) and stops on them, since their handlers are later layers. | `exits` |
+| `vmexits` | Exit dispatch and the run loop: `dispatch()` answers each exit and returns `Flow` (resume / vmcall / stop), with `CPUID` concealment, `RDMSR`/`WRMSR` forwarding, `HLT`, `VMCALL`, triple fault, and the control-register and EPT-violation handlers. `run()` drives a guest to a stop or a hypercall, resolving EPT violations through a `Partition`. | `exits` |
 | `crates/hv-core/src/selftest.rs` | Feature-gated (`vmx-selftest`) battery that drives all of the above on real hardware and reports `[PASS]`/`[FAIL]` per check. | — |
 
 ## Verification status
@@ -90,12 +90,13 @@ Remaining, roughly in order:
    VMX (`vmx`/`vmcs`/`ept`/`vmexits`) backend rather than assuming SVM. Today the
    AMD branch is the whole guest path and the Intel branch stops with a report
    (`CoreError::IntelBackendNotWired`) instead of faulting on the first SVM
-   instruction. What remains is the VMX guest path the Intel branch would take:
-   a partition-equivalent that owns the guest's EPT and memory, the run loop
-   driving `vmexits::dispatch`, the portal, SMP bring-up, and device
-   interposition — the VMX counterparts of what `exits`/`partition`/`portal`
-   give the SVM side. Unlike the mechanisms above, finishing it is validated by
-   booting a real guest on an Intel machine, not by the self-test battery.
+   instruction. The run loop driving `vmexits::dispatch` now exists as
+   `vmexits::run`, taking a `Partition` for the guest's memory. What remains is
+   the rest of that path: a partition-equivalent that owns the firmware guest's
+   full EPT and memory, the portal, SMP bring-up, and device interposition —
+   the VMX counterparts of what `partition`/`portal` give the SVM side. Unlike
+   the mechanisms above, finishing it is validated by booting a real guest on an
+   Intel machine, not by the self-test battery.
 
 ## Gotchas learned the hard way
 
