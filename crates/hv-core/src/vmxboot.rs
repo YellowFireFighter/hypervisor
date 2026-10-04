@@ -68,6 +68,22 @@ const X2APIC_ENABLE: u64 = 1 << 10;
 /// portal makes calls of its own that the ABI requires a 16-byte stack for.
 const CALL_STACK_ALIGN: u64 = 16;
 
+/// How long the preemption timer runs before forcing an exit, in the units the
+/// processor counts it in. Short enough to sample a spin promptly, long enough
+/// that a guest making progress runs meaningfully between samples.
+const PREEMPTION_QUANTUM: u32 = 0x8000;
+
+/// How many quanta the guest may sit at one instruction pointer before it is
+/// declared stuck there.
+const SPIN_THRESHOLD: u32 = 1000;
+
+/// The most preemption quanta the probe samples before stopping regardless.
+const SAMPLE_BUDGET: u32 = 30_000;
+
+/// The most distinct instruction pointers the sampler logs, so a guest making
+/// steady progress does not flood the log.
+const SAMPLE_LOG_LIMIT: u32 = 16;
+
 /// The four VMCS fields that describe one guest segment: selector, base, limit
 /// and access rights.
 type SegmentFields = (FieldEncoding, FieldEncoding, FieldEncoding, FieldEncoding);
@@ -257,6 +273,16 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, handoff:
 fn resume(cell: &mut Vmcs, portal: &Portal) {
     let mut registers = Registers::default();
     let mut partition = Identity;
+    // Arm the preemption timer, so a guest that spins without ever exiting is
+    // still forced out each quantum and the resume loop can see where it is.
+    // SAFETY: `cell` is the current VMCS in VMX operation.
+    if let Err(error) = unsafe { controls::set_preemption_timer(cell, PREEMPTION_QUANTUM) } {
+        error!("vmxboot: could not arm the preemption timer: {error}");
+    }
+    let mut last_rip = u64::MAX;
+    let mut same = 0_u32;
+    let mut total = 0_u32;
+    let mut logged = 0_u32;
     loop {
         // SAFETY: `cell` is the current, fully programmed VMCS, this processor
         // is in VMX operation, and bring-up installed the general-protection
@@ -267,12 +293,63 @@ fn resume(cell: &mut Vmcs, portal: &Portal) {
                     break;
                 }
             }
+            Exit::Stopped(Stop::Unhandled(BasicExitReason::PREEMPTION_TIMER_EXPIRED)) => {
+                if sample(cell, &mut last_rip, &mut same, &mut total, &mut logged) {
+                    break;
+                }
+            }
             outcome @ Exit::Stopped(_) => {
                 report(cell, outcome);
                 break;
             }
         }
     }
+}
+
+/// Records where a preemption-timer exit caught the guest and says whether the
+/// probe should stop.
+///
+/// A guest that is making progress shows a changing instruction pointer, which
+/// is logged as it moves; one that is stuck shows the same one over and over,
+/// and once it has stood still for [`SPIN_THRESHOLD`] quanta it is reported as
+/// spinning there and the probe stops. A guest doing neither after
+/// [`SAMPLE_BUDGET`] quanta is stopped with what was seen, so the probe never
+/// runs on forever.
+fn sample(
+    cell: &Vmcs,
+    last_rip: &mut u64,
+    same: &mut u32,
+    total: &mut u32,
+    logged: &mut u32,
+) -> bool {
+    // SAFETY: `cell` is current; the guest instruction pointer is readable after
+    // any exit.
+    let rip = unsafe { cell.read(Field::GUEST_RIP) }.unwrap_or(0);
+    *total += 1;
+    if rip == *last_rip {
+        *same += 1;
+        if *same >= SPIN_THRESHOLD {
+            error!(
+                "vmxboot: the guest is spinning at rip {rip:#x} ({same} quanta without moving); stopping"
+            );
+            return true;
+        }
+    } else {
+        *same = 0;
+        *last_rip = rip;
+        if *logged < SAMPLE_LOG_LIMIT {
+            info!("vmxboot: guest running at rip {rip:#x} (quantum {total})");
+            *logged += 1;
+        }
+    }
+    if *total >= SAMPLE_BUDGET {
+        error!(
+            "vmxboot: sampled {total} quanta without a stop; last rip {:#x}",
+            *last_rip
+        );
+        return true;
+    }
+    false
 }
 
 /// Answers one portal notification, stepping over its `VMCALL` and saying
