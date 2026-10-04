@@ -19,7 +19,7 @@ use ept::{ENTRIES, Memory};
 use log::{error, info, warn};
 use paging::AddressSpace;
 use vmcs::{Entered, Registers, VmFail, Vmcs, controls, guest, host, instr, run};
-use vmexits::{Flow, Stop};
+use vmexits::{Exit, Flow, Partition, Stop};
 use vmx::{
     BasicExitReason, Capability, EptAccess, EptEntry, EptMemoryType, EptPointer, ExitReason, Field,
     Interruption, PAGE_BYTES, PinBased, PrimaryProc, SecondaryProc, VmExit, VmxBasic,
@@ -164,6 +164,10 @@ fn battery(cell: &mut Vmcs, space: &AddressSpace, basic: VmxBasic) {
         check(
             "EPT violation demand-maps a missing page",
             ept_demand_probe(cell, space),
+        );
+        check(
+            "mixed guest driven to a hypercall by the run loop",
+            run_loop_probe(cell, space),
         );
     } else {
         warn!("vmx: EPT not available on this processor; skipping the EPT guest checks");
@@ -1507,6 +1511,98 @@ fn tpr_threshold_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
         );
     }
     drop((vapic, stack));
+    ok
+}
+
+/// A self-test partition: it owns a guest's address space and demand-maps the
+/// data page on the EPT violation the guest takes reaching it.
+struct DemandPartition<'a> {
+    gs: GuestSpace<'a>,
+}
+
+impl Partition for DemandPartition<'_> {
+    fn fault(&mut self, gpa: u64) -> bool {
+        if gpa & !0xFFF != GUEST_DATA {
+            return false;
+        }
+        if ept::map(
+            &mut self.gs.memory,
+            self.gs.root,
+            GUEST_DATA,
+            self.gs.data_pa,
+            GUEST_EPT_ACCESS,
+            EptMemoryType::WriteBack,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        // SAFETY: the run loop calls this only in VMX operation, and the EPT just
+        // changed is the one `eptp` names, whose stale translations must drop.
+        unsafe { instr::invept_single(self.gs.eptp.bits()) }
+            .ok()
+            .is_ok()
+    }
+}
+
+/// A guest that runs a mixed workload: `CPUID`, a read of memory that is not
+/// yet mapped, and a `VMCALL`.
+///
+/// `CPUID` is emulated by the dispatch, the read faults and is demand-mapped by
+/// the partition, and the `VMCALL` ends the run — so reaching it with both
+/// results proves the loop composes an emulated exit, a resolved fault and a
+/// hypercall in one run.
+#[unsafe(naked)]
+unsafe extern "C" fn guest_mixed() {
+    core::arch::naked_asm!(
+        "mov eax, 1",
+        "cpuid",
+        "mov r10, rbx",
+        "mov rdi, {data}",
+        "mov r8, [rdi]",
+        "vmcall",
+        "2:",
+        "hlt",
+        "jmp 2b",
+        data = const GUEST_DATA,
+    );
+}
+
+/// Runs the mixed-workload guest through the real [`vmexits::run`] loop and
+/// checks it reached the hypercall with the emulated `CPUID` result and the
+/// demand-mapped value.
+fn run_loop_probe(cell: &mut Vmcs, space: &AddressSpace) -> bool {
+    let Some(gs) = build_guest_space(space, guest_mixed as *const (), false) else {
+        return false;
+    };
+    // SAFETY: `cell` is the current VMCS and VMX operation is live; the guest
+    // space was built above and the CR3 override names the guest's PML4.
+    let programmed = unsafe {
+        program_guest(cell, Some(gs.eptp), gs.rip, GUEST_STACK_TOP)
+            .and_then(|()| cell.write(Field::GUEST_CR3, GUEST_PML4))
+    };
+    if let Err(error) = programmed {
+        error!("vmx: run-loop programming failed: {error}");
+        return false;
+    }
+
+    let mut partition = DemandPartition { gs };
+    let mut registers = Registers::default();
+    // SAFETY: `cell` is current and fully programmed, probe has claimed the
+    // general-protection vector, and the partition resolves faults in VMX
+    // operation.
+    let exit = unsafe { vmexits::run(cell, &mut registers, &mut partition) };
+    let expected = processor::cpuid(1, 0);
+    let ok = exit == Exit::Vmcall
+        && registers.r8 == GUEST_PLANTED
+        && registers.r10 == u64::from(expected.ebx);
+    if !ok {
+        error!(
+            "vmx: run-loop: {exit:?}, planted {:#x}, ebx {:#x}",
+            registers.r8, registers.r10
+        );
+    }
+    drop(partition);
     ok
 }
 
