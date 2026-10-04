@@ -210,7 +210,7 @@ pub(crate) fn attempt(space: &AddressSpace, firmware: &FirmwareContext, top_of_r
         return;
     }
     info!(
-        "vmxboot: VMCS programmed from firmware state; guest cr3 {:#x}, entry {:#x}, firmware rflags {:#x} (entered with interrupts masked)",
+        "vmxboot: VMCS programmed from firmware state; guest cr3 {:#x}, entry {:#x}, firmware rflags {:#x} (interrupts left as firmware had them)",
         firmware.cpu.cr3,
         entry.as_u64(),
         firmware.cpu.rflags
