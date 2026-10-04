@@ -5,7 +5,9 @@
 //! memory of its own — a caller supplies frames and a way to reach them through
 //! the [`Memory`] trait — so the same builder runs over real frames in the
 //! hypervisor and over ordinary allocations under test, which is what lets the
-//! tree construction be checked on the host.
+//! tree construction be checked on the host. An identity tree this crate built
+//! has also been installed on an Intel processor and walked while it ran a
+//! guest.
 //!
 //! Two ways to build a tree are offered. [`identity`] maps a run of
 //! guest-physical memory straight through to the same host-physical addresses

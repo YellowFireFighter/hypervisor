@@ -18,15 +18,16 @@
 //! reconciliation and flag decoding they rest on are therefore proven, not just
 //! compiled.
 //!
-//! Guest entry has also run: [`run::run`] drives `VMLAUNCH`, and on an Intel
-//! processor it has launched a flat 64-bit guest — programmed by [`host`],
-//! [`controls`] and [`guest`] — which executed one instruction and exited back
-//! into the hypervisor, with the host state restored and the exit reason read
-//! from the VMCS. So the world switch, the state programming and the VM-entry
-//! checks are proven for that path. What has not yet run is `VMRESUME`: nothing
-//! re-enters a guest after its first exit yet. The pure decisions throughout —
-//! the flag decoding in [`error`] and the control-register reconciliation in
-//! [`fixed`] — are also tested on the host.
+//! The guest run loop has run too, in full. On an Intel processor [`run::run`]
+//! has launched a flat 64-bit guest — programmed by [`host`], [`controls`] and
+//! [`guest`] — resumed it across several exits with its general registers saved
+//! and restored each time, and run it both directly in the host's address space
+//! and behind an EPT second translation; a second VMCS has been made current
+//! and switched back. So `VMLAUNCH`, `VMRESUME`, the register save and restore,
+//! the state programming and the VM-entry checks are all proven, not only
+//! compiled. The pure decisions throughout — the flag decoding in [`error`] and
+//! the control-register reconciliation in [`fixed`] — are also tested on the
+//! host.
 //!
 //! # Shape
 //!

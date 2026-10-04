@@ -5,9 +5,10 @@
 //! saves and restores almost nothing of the general registers itself — only
 //! `RSP` and `RIP`, which live in the VMCS — so this loads the guest's
 //! registers before entry and saves them on exit by hand, around `VMLAUNCH` or
-//! `VMRESUME`. It has launched a guest on an Intel processor and brought
-//! control back cleanly through the exit path below; the resume path has not
-//! yet been taken.
+//! `VMRESUME`. It has launched a guest on an Intel processor, brought control
+//! back cleanly through the exit path below with the guest's registers saved,
+//! and taken the resume path too — a guest has been resumed across several
+//! exits.
 //!
 //! # How control comes back
 //!
