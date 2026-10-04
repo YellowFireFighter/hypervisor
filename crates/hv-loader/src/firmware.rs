@@ -94,12 +94,23 @@ pub struct GuestImage {
 /// gives their handles no meaningful order. More than one match is refused: a
 /// boot decision made from handle order would not be reproducible.
 ///
+/// Under the `no-guest` feature no boot manager is searched for or started: the
+/// loader's own already-loaded image handle is handed on in place of one that
+/// is never started, which is what the VMX self-test wants, since it halts
+/// before any guest runs, and lets that build boot on a machine that has
+/// several boot managers or none.
+///
 /// # Errors
 ///
 /// [`LoaderError::GuestImageMissing`] if no volume contains the configured
 /// path, [`LoaderError::GuestImageAmbiguous`] if several do, or a firmware
-/// error from protocol opening or image loading.
+/// error from protocol opening or image loading. None under `no-guest`.
 pub fn load_guest() -> Result<GuestImage, LoaderError> {
+    if cfg!(feature = "no-guest") {
+        return Ok(GuestImage {
+            handle: boot::image_handle(),
+        });
+    }
     let mut selected = None;
     for handle in
         boot::find_handles::<SimpleFileSystem>().context("enumerate filesystem volumes")?
