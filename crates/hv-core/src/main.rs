@@ -48,6 +48,8 @@ mod screen;
 #[cfg(feature = "vmx-selftest")]
 mod selftest;
 mod uacpi;
+#[cfg(feature = "vmx-boot")]
+mod vmxboot;
 
 use core::{convert::Infallible, ffi::c_void, hint::black_box, panic::PanicInfo};
 
@@ -233,6 +235,16 @@ fn bring_up(handoff: &'static Handoff) -> Result<Infallible, CoreError> {
     // is not yet wired into bring-up. This stops a plausible boot of this image
     // on an Intel machine from faulting on the first SVM instruction.
     if processor::vendor() == processor::Vendor::Intel {
+        // With the VMX-boot feature, take the first real step of the Intel guest
+        // path before halting: enter VMX operation and run the captured firmware
+        // as a guest, reporting how far it got. Without it, stop with a report
+        // rather than faulting on the first SVM instruction.
+        #[cfg(feature = "vmx-boot")]
+        {
+            vmxboot::attempt(&space, firmware, handoff.top_of_ram);
+            return Err(CoreError::VmxBootProbeComplete);
+        }
+        #[cfg(not(feature = "vmx-boot"))]
         return Err(CoreError::IntelBackendNotWired);
     }
 

@@ -90,5 +90,12 @@ splash = []
 # real hardware; off in every ordinary build.
 vmx-selftest = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits", "dep:hypercall"]
 
+# A first attempt, on an Intel processor, at running the captured firmware as a
+# VMX guest: it enters VMX operation, builds an EPT over all of RAM, programs a
+# VMCS from the firmware save area, enters the guest, and reports how the entry
+# and the first exits went, then halts. For bringing the Intel guest path up on
+# real hardware; off in every ordinary build.
+vmx-boot = ["dep:vmx", "dep:vmcs", "dep:ept", "dep:vmexits"]
+
 [lints]
 workspace = true
