@@ -91,6 +91,10 @@ const SAMPLE_BUDGET: u32 = 100_000;
 /// steady progress does not flood the log.
 const SAMPLE_LOG_LIMIT: u32 = 24;
 
+/// The most instruction sites the sampler reads bytes back from, so a tight
+/// poll loop's body is captured early without flooding the log.
+const CODE_DUMP_LIMIT: u32 = 6;
+
 /// How often, in preemption quanta, to log a heartbeat once the distinct-rip
 /// log is full, so a long run shows it is still progressing and where.
 const HEARTBEAT_QUANTA: u32 = 1000;
@@ -194,6 +198,9 @@ struct ApicForward {
     /// controller is in x2APIC mode and reached through model-specific
     /// registers this does not map.
     eoi: Option<*mut u32>,
+    /// How many end-of-interrupts have been completed on the real controller,
+    /// so a stuck guest can be told from one whose interrupts are flowing.
+    forwarded: u64,
 }
 
 impl ApicWrites for ApicForward {
@@ -207,6 +214,7 @@ impl ApicWrites for ApicForward {
             // the interrupt the guest just finished, and the guest is not
             // running during this exit, so nothing races the write.
             unsafe { eoi.write_volatile(0) };
+            self.forwarded += 1;
         }
     }
 }
@@ -258,9 +266,12 @@ pub(crate) fn attempt(space: &mut AddressSpace, firmware: &FirmwareContext, hand
     // borrowed mutably, so the guest's end-of-interrupt can be completed on it.
     // Kept alive to the end of the run, because the forwarding reads through it.
     let lapic = map_apic_eoi(space, firmware);
-    let apic_eoi = lapic
+    let lapic_base = lapic
         .as_ref()
-        .map(|mapping| (mapping.addr().as_u64() + u64::from(APIC_END_OF_INTERRUPT)) as *mut u32);
+        .map(|mapping| mapping.addr().as_u64() as *mut u32);
+    if lapic_base.is_some() {
+        info!("vmxboot: completing the guest's end-of-interrupt on the real local APIC");
+    }
     // The mapping above is the only mutable use of the address space; everything
     // below reads it, so reborrow it shared for the rest of the run.
     let space: &AddressSpace = space;
@@ -371,7 +382,7 @@ pub(crate) fn attempt(space: &mut AddressSpace, firmware: &FirmwareContext, hand
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
     unsafe { predict(&cell) };
 
-    resume(&mut cell, &portal, vapic_addr, space, apic_eoi);
+    resume(&mut cell, &portal, vapic_addr, space, lapic_base);
 
     cleanup(&cell);
     // SAFETY: `cell` is no longer current after `cleanup`, the precondition for
@@ -394,11 +405,15 @@ fn resume(
     portal: &Portal,
     vapic_addr: Option<u64>,
     space: &AddressSpace,
-    apic_eoi: Option<*mut u32>,
+    lapic_base: Option<*mut u32>,
 ) {
     let mut registers = Registers::default();
     let mut partition = Identity;
-    let mut apic = ApicForward { eoi: apic_eoi };
+    // The APIC is a file of 32-bit registers, so `lapic_base` points at them and
+    // a byte offset indexes it in four-byte steps.
+    let eoi = lapic_base.map(|base| base.wrapping_add(APIC_END_OF_INTERRUPT as usize / 4));
+    let mut apic = ApicForward { eoi, forwarded: 0 };
+    let mut sampler = Sampler::new();
     let mut dumped = false;
     // Arm the preemption timer, so a guest that spins without ever exiting is
     // still forced out each quantum and the resume loop can see where it is.
@@ -406,10 +421,6 @@ fn resume(
     if let Err(error) = unsafe { controls::set_preemption_timer(cell, PREEMPTION_QUANTUM) } {
         error!("vmxboot: could not arm the preemption timer: {error}");
     }
-    let mut last_rip = u64::MAX;
-    let mut same = 0_u32;
-    let mut total = 0_u32;
-    let mut logged = 0_u32;
     loop {
         // SAFETY: `cell` is the current, fully programmed VMCS, this processor
         // is in VMX operation, and bring-up installed the general-protection
@@ -421,27 +432,26 @@ fn resume(
                 }
             }
             Exit::Stopped(Stop::Unhandled(BasicExitReason::PREEMPTION_TIMER_EXPIRED)) => {
-                if let Some(addr) = vapic_addr {
-                    if !dumped {
+                if !dumped {
+                    if let Some(addr) = vapic_addr {
                         // SAFETY: `addr` names the live, held virtual-APIC page,
                         // and the guest is not running during this exit, so
                         // reading it races nothing.
                         unsafe { dump_vapic(addr) };
-                        dumped = true;
                     }
+                    if let Some(base) = lapic_base {
+                        // SAFETY: `base` is the live uncached mapping of the real
+                        // local APIC; the guest is not running during this exit.
+                        unsafe { dump_real_apic(base, apic.forwarded) };
+                    }
+                    dumped = true;
+                }
+                if let Some(addr) = vapic_addr {
                     // SAFETY: as above; `cell` is current, so the guest state
                     // the injection consults is readable and writable.
                     unsafe { drive_timer(cell, addr) };
                 }
-                if sample(
-                    cell,
-                    space,
-                    &registers,
-                    &mut last_rip,
-                    &mut same,
-                    &mut total,
-                    &mut logged,
-                ) {
+                if sampler.record(cell, space, &registers, apic.forwarded) {
                     break;
                 }
             }
@@ -564,66 +574,99 @@ unsafe fn dump_vapic(addr: u64) {
     );
 }
 
-/// Records where a preemption-timer exit caught the guest and says whether the
-/// probe should stop.
-///
-/// A guest that is making progress shows a changing instruction pointer, which
-/// is logged as it moves; one that is stuck shows the same one over and over,
-/// and once it has stood still for [`SPIN_THRESHOLD`] quanta it is reported as
-/// spinning there and the probe stops. A guest doing neither after
-/// [`SAMPLE_BUDGET`] quanta is stopped with what was seen, so the probe never
-/// runs on forever.
-fn sample(
-    cell: &Vmcs,
-    space: &AddressSpace,
-    registers: &Registers,
-    last_rip: &mut u64,
-    same: &mut u32,
-    total: &mut u32,
-    logged: &mut u32,
-) -> bool {
-    // SAFETY: `cell` is current; the guest instruction pointer is readable after
-    // any exit.
-    let rip = unsafe { cell.read(Field::GUEST_RIP) }.unwrap_or(0);
-    *total += 1;
-    if rip == *last_rip {
-        *same += 1;
-        if *same >= SPIN_THRESHOLD {
+/// The mutable state the preemption-timer sampler keeps across quanta.
+struct Sampler {
+    /// The instruction pointer the last sample caught.
+    last_rip: u64,
+    /// How many consecutive samples have caught that same pointer.
+    same: u32,
+    /// How many samples have been taken in all.
+    total: u32,
+    /// How many distinct instruction pointers have been logged.
+    logged: u32,
+    /// How many instruction sites have had their bytes read back.
+    coded: u32,
+}
+
+impl Sampler {
+    /// A fresh sampler, before the first preemption exit.
+    fn new() -> Self {
+        Self {
+            last_rip: u64::MAX,
+            same: 0,
+            total: 0,
+            logged: 0,
+            coded: 0,
+        }
+    }
+
+    /// Records where a preemption-timer exit caught the guest and says whether
+    /// the probe should stop.
+    ///
+    /// A guest making progress shows a changing instruction pointer, logged as
+    /// it moves, and the first few distinct sites have their bytes read back so
+    /// a tight poll loop can be decoded without waiting for the budget. A guest
+    /// standing still for [`SPIN_THRESHOLD`] quanta is reported as spinning and
+    /// the probe stops; one doing neither after [`SAMPLE_BUDGET`] quanta is
+    /// stopped with what was seen. `forwarded` is how many end-of-interrupts
+    /// have reached the real controller, logged so a frozen guest whose
+    /// interrupts are flowing can be told from one whose are not.
+    fn record(
+        &mut self,
+        cell: &Vmcs,
+        space: &AddressSpace,
+        registers: &Registers,
+        forwarded: u64,
+    ) -> bool {
+        // SAFETY: `cell` is current; the guest instruction pointer is readable
+        // after any exit.
+        let rip = unsafe { cell.read(Field::GUEST_RIP) }.unwrap_or(0);
+        self.total += 1;
+        if rip == self.last_rip {
+            self.same += 1;
+            if self.same >= SPIN_THRESHOLD {
+                error!(
+                    "vmxboot: the guest is spinning at rip {rip:#x} ({} quanta without moving, {forwarded} end-of-interrupts forwarded); stopping",
+                    self.same
+                );
+                spin_report(space, registers, rip);
+                return true;
+            }
+        } else {
+            self.same = 0;
+            self.last_rip = rip;
+            if self.logged < SAMPLE_LOG_LIMIT {
+                info!(
+                    "vmxboot: guest running at rip {rip:#x} (quantum {})",
+                    self.total
+                );
+                self.logged += 1;
+            }
+            if self.coded < CODE_DUMP_LIMIT {
+                dump_code(space, rip);
+                self.coded += 1;
+            }
+        }
+        if self.logged >= SAMPLE_LOG_LIMIT && self.total.is_multiple_of(HEARTBEAT_QUANTA) {
+            info!(
+                "vmxboot: still running at rip {rip:#x} after {} quanta, {forwarded} end-of-interrupts forwarded",
+                self.total
+            );
+        }
+        if self.total >= SAMPLE_BUDGET {
             error!(
-                "vmxboot: the guest is spinning at rip {rip:#x} ({same} quanta without moving); stopping"
+                "vmxboot: sampled {} quanta without a stop ({forwarded} end-of-interrupts forwarded); last rip {rip:#x}",
+                self.total
             );
             spin_report(space, registers, rip);
             return true;
         }
-    } else {
-        *same = 0;
-        *last_rip = rip;
-        if *logged < SAMPLE_LOG_LIMIT {
-            info!("vmxboot: guest running at rip {rip:#x} (quantum {total})");
-            *logged += 1;
-        }
+        false
     }
-    if *logged >= SAMPLE_LOG_LIMIT && total.is_multiple_of(HEARTBEAT_QUANTA) {
-        info!("vmxboot: still running at rip {rip:#x} after {total} quanta");
-    }
-    if *total >= SAMPLE_BUDGET {
-        error!("vmxboot: sampled {total} quanta without a stop; last rip {rip:#x}");
-        spin_report(space, registers, rip);
-        return true;
-    }
-    false
 }
 
-/// Logs the register file and instruction bytes of a guest the sampler gave up
-/// on, so the loop it is turning can be decoded from the host side.
-///
-/// A guest alternating between a couple of instruction pointers is in a tight
-/// poll loop; the registers name what it is testing against and the bytes name
-/// how. Firmware runs its own identity paging, where a linear address is its
-/// physical address, so the instruction pointer doubles as the physical address
-/// the direct map reads the code back from. A pointer the direct map cannot
-/// reach, or one too high to be a physical address, is reported rather than
-/// followed.
+/// Logs the register file of a guest the sampler gave up on, then its
+/// instruction bytes, so the loop it is turning can be decoded from the host.
 fn spin_report(space: &AddressSpace, registers: &Registers, rip: u64) {
     info!(
         "vmxboot: spin regs rax {:#x} rbx {:#x} rcx {:#x} rdx {:#x} rsi {:#x} rdi {:#x} rbp {:#x}",
@@ -646,14 +689,25 @@ fn spin_report(space: &AddressSpace, registers: &Registers, rip: u64) {
         registers.r14,
         registers.r15
     );
+    dump_code(space, rip);
+}
+
+/// Reads the instruction bytes at a guest instruction pointer back from the
+/// host and logs them.
+///
+/// Firmware runs its own identity paging, where a linear address is its
+/// physical address, so the instruction pointer doubles as the physical address
+/// the direct map reads the code from. A pointer the direct map cannot reach,
+/// or one too high to be a physical address, is reported rather than followed.
+fn dump_code(space: &AddressSpace, rip: u64) {
     let Ok(phys) = PhysAddr::try_new(rip) else {
-        warn!("vmxboot: spin rip {rip:#x} is not a physical address to read code from");
+        warn!("vmxboot: rip {rip:#x} is not a physical address to read code from");
         return;
     };
     let virt = match space.direct_map().reach(phys, SPIN_CODE_BYTES) {
         Ok(virt) => virt,
         Err(error) => {
-            warn!("vmxboot: could not reach the spin site at {rip:#x}: {error:?}");
+            warn!("vmxboot: could not reach the code at {rip:#x}: {error:?}");
             return;
         }
     };
@@ -662,7 +716,39 @@ fn spin_report(space: &AddressSpace, registers: &Registers, rip: u64) {
     // lie in the RAM the guest is executing from; the bytes are only read, and
     // the guest is not running during this exit, so nothing writes them.
     let code = unsafe { core::slice::from_raw_parts(virt.as_u64() as *const u8, len) };
-    info!("vmxboot: spin code at {rip:#x}: {code:02x?}");
+    info!("vmxboot: code at {rip:#x}: {code:02x?}");
+}
+
+/// Logs the real local APIC's state beside the virtual one, to show whether an
+/// interrupt is stuck in service on the real controller — which is what blocks
+/// further delivery — or whether none is pending there at all.
+///
+/// # Safety
+///
+/// `base` must be the live, page-sized uncached mapping of the real local APIC,
+/// and the guest must not be running, which holds at a preemption exit.
+unsafe fn dump_real_apic(base: *mut u32, forwarded: u64) {
+    let reg = |offset: usize| {
+        // SAFETY: the caller guarantees a live mapping of the register page;
+        // `base` points at its 32-bit registers, so the byte `offset`, a
+        // multiple of four, indexes it in four-byte steps for a volatile read.
+        unsafe { base.add(offset / 4).read_volatile() }
+    };
+    info!(
+        "vmxboot: real APIC tpr {:#x} ppr {:#x} lvt-timer {:#x} timer-cur {:#x} esr {:#x} ({forwarded} end-of-interrupts forwarded)",
+        reg(APIC_TASK_PRIORITY),
+        reg(APIC_PROCESSOR_PRIORITY),
+        reg(APIC_LVT_TIMER),
+        reg(APIC_TIMER_CURRENT_COUNT),
+        reg(APIC_ERROR_STATUS),
+    );
+    let bank =
+        |start: usize| core::array::from_fn::<u32, 8, _>(|i| reg(start + i * APIC_REGISTER_STRIDE));
+    info!("vmxboot: real APIC isr {:#x?}", bank(APIC_IN_SERVICE));
+    info!(
+        "vmxboot: real APIC irr {:#x?}",
+        bank(APIC_INTERRUPT_REQUEST)
+    );
 }
 
 /// Answers one portal notification, stepping over its `VMCALL` and saying
