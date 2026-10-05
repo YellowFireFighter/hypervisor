@@ -6,6 +6,103 @@ foundational layers exist and are proven on Intel hardware; the higher layers
 that a real OS guest needs do not yet exist. This file is the map of what is
 done, how it is tested, and what remains.
 
+## Handoff — current state and what to do next (read this first)
+
+**The goal.** Boot a real Intel Windows PC behind citrine from a USB stick:
+citrine loads from the stick, captures firmware, re-enters firmware as a VMX
+guest through the "portal", lets it start Windows' boot manager, and keeps the
+machine virtualized from then on. The AMD/SVM side of this already works; the
+Intel/VMX side is being brought up to match it.
+
+**Where the work is.** The active path is the firmware-guest VMX probe behind
+the `vmx-boot` feature: `crates/hv-core/src/vmxboot.rs` (the driver) plus
+`crates/vmcs/src/controls.rs` (VMCS control programming), `crates/ept`,
+`crates/vmexits`, `crates/portal`. On an Intel machine `hv-core` takes the
+Intel branch in `crates/hv-core/src/main.rs` (~line 240) and calls
+`vmxboot::attempt`.
+
+**What already works on the real hardware** (confirmed by the user's boot
+photos): VM entry with real firmware state passes every consistency check; the
+guest runs behind an identity EPT with firmware's own paging; the portal runs;
+the local APIC is virtualized so firmware's INIT/SIPI no longer reset the box.
+
+**The blocker being chased.** After APIC virtualization the firmware guest no
+longer resets but *stalls*: it spins in a tight poll loop (seen bouncing between
+two addresses, e.g. `0x65498041` ↔ `0x65492492`) and never progresses, because
+its periodic timer/event interrupt was not reaching it. Fixes tried, newest
+last:
+1. Fake-tick the virtual-APIC timer and inject its vector — didn't help (the
+   firmware timer's LVT vector is below the APIC's legal range; removed).
+2. Forward the guest's end-of-interrupt to the real local APIC
+   (`ApicForward`) — correct but not sufficient alone.
+3. **Interrupt reflection (current, newest commit).** External-interrupt
+   exiting + acknowledge-on-exit: every physical interrupt now VM-exits with its
+   vector, and the host injects it into the guest's own IDT (holding it behind an
+   interrupt-window when the guest has interrupts masked). This is the VMX
+   counterpart of what the AMD world switch does. **Awaiting a hardware test.**
+
+**How to read the next boot photo** (the probe logs to the screen, newest at the
+bottom):
+- `external interrupts exit to the host and are reflected into the guest` →
+  reflection armed.
+- Sample lines carry `N interrupts delivered` and `M end-of-interrupts
+  forwarded`, plus `guest running at rip 0x…`. **Win:** RIPs move to *new*
+  regions and `interrupts delivered` climbs. **Still stuck + `0 delivered`:**
+  interrupts still aren't arriving (look elsewhere — PIC/IOAPIC routing, the
+  real-APIC dump lines `real APIC isr/irr`). **Stuck + `N delivered`:**
+  interrupts flow but firmware waits on something else — decode the loop from the
+  `code at 0x…: [bytes]` and `spin regs …` lines the probe prints.
+
+**If reflection works**, the next milestones are: firmware reaches
+`ExitBootServices` (Windows' boot manager ran under citrine — the big proof),
+then the unbuilt post-`ExitBootServices` VMX path: starting the other CPU cores
+(SMP), concealing the portal, and interposing on devices — the VMX counterparts
+of what `partition`/`portal`/`vlapic` give the SVM side.
+
+**The AMD path is the blueprint.** The working interrupt virtualization lives in
+`crates/vlapic` (a full virtual local APIC) + `crates/inject` + `crates/exits`,
+driven from `exits::Dispatcher::run`. "Make the Intel side like AMD" ultimately
+means either reflection (done, software injection) maturing into a `vlapic`-style
+model, or enabling hardware virtual-interrupt-delivery (VID/APICv) — the Intel
+equivalent of AVIC. A reference Intel VMX hypervisor the user pointed at:
+`github.com/tomtzook/hype` (note: it hyperjacks the running system and does *not*
+virtualize the APIC, so interrupts pass straight through — citrine virtualizes
+the APIC for reset protection, which is why it must reflect).
+
+**Testing (important).** This repo builds and boots under QEMU, and QEMU's
+software (TCG) mode emulates **AMD SVM** — so `-cpu max` runs citrine's *SVM*
+path and is good for boot/regression checks. It does **not** emulate **Intel
+VMX**, and the cloud dev box has no `/dev/kvm` / nested VT-x, so the VMX
+firmware-guest path **can only be validated on real Intel hardware**. Pre-flight
+a build with:
+```sh
+qemu-system-x86_64 -machine q35 -accel tcg -cpu max -m 4G -smp 1 \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+  -drive if=pflash,format=raw,file=<writable copy of OVMF_VARS_4M.fd> \
+  -drive if=none,id=esp,format=raw,file=fat:rw:<esp dir> \
+  -device ide-hd,drive=esp,bus=ide.0,bootindex=0 \
+  -serial file:boot.log -display none -no-reboot -no-shutdown
+```
+(build that esp dir's images **without** `efifb` so logs go to serial).
+
+**Build the bootable USB image for the user** (on-screen log via `efifb`, Intel
+firmware-guest probe, Windows boot manager as the guest):
+```sh
+cargo build -p hv-loader -p hv-core \
+  --features hv-loader/efifb,hv-core/efifb,hv-core/vmx-boot
+# then stage a GPT+FAT32 ESP: BOOTX64.EFI = hv-loader.efi, \citrine.efi =
+# hv-core.efi, package with sgdisk/mtools, gzip, and send to the user to flash.
+```
+Swap `vmx-boot`→`vmx-selftest` (add `hv-loader/no-guest`) to run the self-test
+battery instead. Gates before every commit: `cargo fmt --all -- --check`,
+`cargo clippy --all-targets`, `cargo clippy -p hv-core --features vmx-boot
+--target x86_64-unknown-uefi`, and the same with `vmx-selftest`.
+
+**Honest scope.** Reaching `ExitBootServices` proves Windows' boot manager runs
+under citrine; carrying it all the way to a Windows desktop is a large amount of
+further work (the whole post-firmware OS path). No single boot gets from here to
+the desktop.
+
 ## The crates, and their SVM counterparts
 
 | Intel crate | Role | SVM counterpart |
