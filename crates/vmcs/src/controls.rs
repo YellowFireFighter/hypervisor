@@ -283,3 +283,76 @@ pub unsafe fn set_preemption_timer(cell: &Vmcs, value: u32) -> Result<(), VmFail
     }
     Ok(())
 }
+
+/// Makes external interrupts exit to the host, with the interrupt acknowledged
+/// on exit so the exit carries its vector, and reports whether the processor
+/// allows both.
+///
+/// This is how the host takes a guest's interrupts for itself: every physical
+/// interrupt becomes a VM exit whose interruption-information field already
+/// names the vector the real controller delivered, which the host then reflects
+/// into the guest through the guest's own interrupt descriptor table — the VMX
+/// counterpart of the AMD world switch's interrupt interception. A processor
+/// that forbids either control is left without the feature rather than refused
+/// entry, and answers `false`.
+///
+/// Call it after [`program`], whose pin and exit control words this adds to.
+///
+/// # Errors
+///
+/// The [`VmFail`] from the `VMREAD` or `VMWRITE` the processor rejects.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+pub unsafe fn reflect_interrupts(cell: &Vmcs) -> Result<bool, VmFail> {
+    // SAFETY: the caller guarantees the current VMCS in VMX operation, on which
+    // these capability registers exist.
+    unsafe {
+        let pin_cap = Capability::from_bits(msr::rdmsr(IA32_VMX_PINBASED_CTLS));
+        let exit_cap = Capability::from_bits(msr::rdmsr(IA32_VMX_EXIT_CTLS));
+        if !pin_cap.allows(PinBased::EXTERNAL_INTERRUPT_EXITING.bits())
+            || !exit_cap.allows(VmExit::ACKNOWLEDGE_INTERRUPT_ON_EXIT.bits())
+        {
+            return Ok(false);
+        }
+        let pin = cell.read(Field::PIN_BASED_CONTROLS)?;
+        cell.write(
+            Field::PIN_BASED_CONTROLS,
+            pin | u64::from(PinBased::EXTERNAL_INTERRUPT_EXITING.bits()),
+        )?;
+        let exit = cell.read(Field::PRIMARY_VM_EXIT_CONTROLS)?;
+        cell.write(
+            Field::PRIMARY_VM_EXIT_CONTROLS,
+            exit | u64::from(VmExit::ACKNOWLEDGE_INTERRUPT_ON_EXIT.bits()),
+        )?;
+    }
+    Ok(true)
+}
+
+/// Turns interrupt-window exiting on or off.
+///
+/// With it on, the guest exits the moment it can take an interrupt — interrupts
+/// enabled and no instruction shadow — which is how the host delivers an
+/// interrupt it is holding for a guest that had interrupts masked when the
+/// interrupt arrived. It is turned off again once nothing is waiting, so a
+/// guest that can always take its interrupts does not exit for a window it does
+/// not need.
+///
+/// # Errors
+///
+/// The [`VmFail`] from the `VMREAD` or `VMWRITE` the processor rejects.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+pub unsafe fn request_interrupt_window(cell: &Vmcs, want: bool) -> Result<(), VmFail> {
+    let bit = u64::from(PrimaryProc::INTERRUPT_WINDOW_EXITING.bits());
+    // SAFETY: the caller guarantees the current VMCS in VMX operation.
+    unsafe {
+        let primary = cell.read(Field::PRIMARY_PROC_CONTROLS)?;
+        let next = if want { primary | bit } else { primary & !bit };
+        cell.write(Field::PRIMARY_PROC_CONTROLS, next)?;
+    }
+    Ok(())
+}

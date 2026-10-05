@@ -99,21 +99,8 @@ const CODE_DUMP_LIMIT: u32 = 6;
 /// log is full, so a long run shows it is still progressing and where.
 const HEARTBEAT_QUANTA: u32 = 1000;
 
-/// Bit 16 of a local-vector-table entry: the interrupt is masked.
-const LVT_MASKED: u32 = 1 << 16;
-
 /// Bit 9 of `RFLAGS`: maskable interrupts are enabled.
 const RFLAGS_INTERRUPT_ENABLE: u64 = 1 << 9;
-
-/// How far the virtual timer's initial count is shifted to get its per-quantum
-/// step, so it counts down over roughly this many quanta.
-const TIMER_STEP_SHIFT: u32 = 4;
-
-/// The lowest vector the local APIC delivers. A local-vector-table entry
-/// programmed with a vector below this raises an illegal-vector error instead
-/// of delivering an interrupt, so such an entry is not injected — doing so
-/// would feed the guest an interrupt its real APIC never would.
-const MIN_DELIVERABLE_VECTOR: u32 = 0x10;
 
 /// How many bytes of the instruction stream to read back from a spinning
 /// guest, enough to capture a tight firmware poll loop and decode what it
@@ -379,6 +366,15 @@ pub(crate) fn attempt(space: &mut AddressSpace, firmware: &FirmwareContext, hand
         .as_ref()
         .map(|(vapic, _)| core::ptr::from_ref(&vapic.0).addr() as u64);
 
+    // Take the guest's external interrupts for the host, so firmware's periodic
+    // timer and device interrupts are delivered into the guest through its own
+    // descriptor table rather than lost — the VMX counterpart of the AMD world
+    // switch's interrupt interception. Without it a firmware guest waiting on its
+    // clock never advances.
+    // SAFETY: `cell` is the current VMCS in VMX operation, with `program`'s pin
+    // and exit controls written.
+    unsafe { enable_reflection(&cell) };
+
     // SAFETY: `cell` is the current, fully programmed VMCS, in VMX operation.
     unsafe { predict(&cell) };
 
@@ -414,6 +410,7 @@ fn resume(
     let eoi = lapic_base.map(|base| base.wrapping_add(APIC_END_OF_INTERRUPT as usize / 4));
     let mut apic = ApicForward { eoi, forwarded: 0 };
     let mut sampler = Sampler::new();
+    let mut reflect = Reflect::new();
     let mut dumped = false;
     // Arm the preemption timer, so a guest that spins without ever exiting is
     // still forced out each quantum and the resume loop can see where it is.
@@ -446,14 +443,19 @@ fn resume(
                     }
                     dumped = true;
                 }
-                if let Some(addr) = vapic_addr {
-                    // SAFETY: as above; `cell` is current, so the guest state
-                    // the injection consults is readable and writable.
-                    unsafe { drive_timer(cell, addr) };
-                }
-                if sampler.record(cell, space, &registers, apic.forwarded) {
+                if sampler.record(cell, space, &registers, apic.forwarded, reflect.delivered) {
                     break;
                 }
+            }
+            Exit::Stopped(Stop::Unhandled(BasicExitReason::EXTERNAL_INTERRUPT)) => {
+                // SAFETY: `cell` is current after an external-interrupt exit, so
+                // its interruption-information field names the vector the real
+                // controller delivered and the guest-state fields are readable.
+                unsafe { reflect.arrived(cell) };
+            }
+            Exit::Stopped(Stop::Unhandled(BasicExitReason::INTERRUPT_WINDOW)) => {
+                // SAFETY: `cell` is current; the guest can take an interrupt now.
+                unsafe { reflect.window(cell) };
             }
             outcome @ Exit::Stopped(_) => {
                 report(cell, outcome);
@@ -463,69 +465,114 @@ fn resume(
     }
 }
 
-/// Ticks the guest's virtual-APIC timer and, when the guest can take it,
-/// injects the timer interrupt.
+/// Reflects the host's external interrupts into the firmware guest.
 ///
-/// The virtual-APIC page is memory, so its timer does not count on its own: a
-/// guest waiting out a delay on the current-count register, or waiting for the
-/// periodic timer's interrupt, would wait forever. Each quantum this decrements
-/// the current count (reloading from the initial count when it runs out, as a
-/// periodic timer does) and, if the timer is unmasked and the guest has
-/// interrupts enabled and is not in an interrupt shadow, injects the vector the
-/// timer entry names. It is a coarse timer — one tick per preemption quantum —
-/// but it is one that moves, which is what a stuck guest needs.
+/// With external-interrupt exiting and acknowledge-on-exit, each physical
+/// interrupt becomes a VM exit whose interruption-information field already
+/// names the vector the real controller delivered, its in-service bit set.
+/// This injects that vector into the guest through the guest's own interrupt
+/// descriptor table the moment the guest can take it, or holds it and asks for
+/// an interrupt window when the guest has interrupts masked — the same
+/// intercept-and-inject the AMD world switch performs. The guest's own
+/// end-of-interrupt, forwarded to the real controller by [`ApicForward`], is
+/// what clears that in-service bit, so the next interrupt is delivered.
+struct Reflect {
+    /// A vector acknowledged on the real controller but not yet injected,
+    /// because the guest had interrupts masked when it arrived. Only the latest
+    /// is held: a timer that ticked twice behind a masked guest is one wakeup.
+    pending: Option<u8>,
+    /// How many interrupts have been injected into the guest.
+    delivered: u64,
+}
+
+impl Reflect {
+    /// A fresh reflector, before any interrupt has arrived.
+    fn new() -> Self {
+        Self {
+            pending: None,
+            delivered: 0,
+        }
+    }
+
+    /// Handles an external-interrupt exit: injects the acknowledged vector now,
+    /// or holds it for an interrupt window.
+    ///
+    /// # Safety
+    ///
+    /// `cell` must be the current VMCS after an external-interrupt exit taken
+    /// with acknowledge-on-exit, so the exit interruption-information field
+    /// names the vector.
+    unsafe fn arrived(&mut self, cell: &Vmcs) {
+        // SAFETY: the caller guarantees the current VMCS and such an exit.
+        let info = unsafe { cell.read(Field::VM_EXIT_INTERRUPTION_INFO) }.unwrap_or(0);
+        let event = Interruption::from_bits(u32::try_from(info & 0xFFFF_FFFF).unwrap_or(0));
+        if !event.is_valid() {
+            return;
+        }
+        // SAFETY: as above.
+        unsafe { self.deliver_or_hold(cell, event.vector()) };
+    }
+
+    /// Handles an interrupt-window exit: injects the held interrupt and turns
+    /// the window off once nothing is waiting.
+    ///
+    /// # Safety
+    ///
+    /// `cell` must be the current VMCS in VMX operation.
+    unsafe fn window(&mut self, cell: &Vmcs) {
+        if let Some(vector) = self.pending.take() {
+            // SAFETY: the caller guarantees the current VMCS.
+            unsafe { self.deliver_or_hold(cell, vector) };
+        }
+        if self.pending.is_none() {
+            // SAFETY: the caller guarantees the current VMCS.
+            let _ = unsafe { controls::request_interrupt_window(cell, false) };
+        }
+    }
+
+    /// Injects `vector` if the guest can take it, otherwise holds it and asks
+    /// for an interrupt window.
+    ///
+    /// # Safety
+    ///
+    /// `cell` must be the current VMCS in VMX operation.
+    unsafe fn deliver_or_hold(&mut self, cell: &Vmcs, vector: u8) {
+        // SAFETY: the caller guarantees the current VMCS.
+        if unsafe { injectable(cell) } {
+            let event = Interruption::inject(vector, vmx::event::Kind::External, false);
+            // SAFETY: the guest is interruptible, so an external interrupt may be
+            // delivered on the next entry, and `cell` is current.
+            if unsafe { cell.write(Field::VM_ENTRY_INTERRUPTION_INFO, u64::from(event.bits())) }
+                .is_ok()
+            {
+                self.delivered += 1;
+            }
+        } else {
+            self.pending = Some(vector);
+            // SAFETY: the caller guarantees the current VMCS.
+            let _ = unsafe { controls::request_interrupt_window(cell, true) };
+        }
+    }
+}
+
+/// Whether the guest can take an external interrupt right now: interrupts
+/// enabled, no instruction shadow, and no event already queued for entry.
 ///
 /// # Safety
 ///
-/// `addr` must name the live, page-sized virtual-APIC page with nothing else
-/// writing it, and `cell` must be the current VMCS in VMX operation.
-unsafe fn drive_timer(cell: &Vmcs, addr: u64) {
-    // SAFETY: the caller guarantees a live page-sized region at `addr` that the
-    // guest is not racing, and this writes only within it.
-    let page = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, PAGE_BYTES) };
-    let read = |page: &[u8], offset: usize| {
-        u32::from_le_bytes([
-            page[offset],
-            page[offset + 1],
-            page[offset + 2],
-            page[offset + 3],
-        ])
-    };
-    let lvt = read(page, APIC_LVT_TIMER);
-    if lvt & LVT_MASKED != 0 {
-        return;
-    }
-    let initial = read(page, APIC_TIMER_INITIAL_COUNT);
-    let current = read(page, APIC_TIMER_CURRENT_COUNT);
-    let step = (initial >> TIMER_STEP_SHIFT).max(1);
-    let next = if current > step {
-        current - step
-    } else {
-        initial
-    };
-    page[APIC_TIMER_CURRENT_COUNT..APIC_TIMER_CURRENT_COUNT + 4]
-        .copy_from_slice(&next.to_le_bytes());
-
-    // SAFETY: `cell` is current; these guest-state fields are readable, and the
-    // entry interruption field is writable, after any exit.
-    let (rflags, interruptibility) = unsafe {
+/// `cell` must be the current VMCS on this processor, in VMX operation.
+unsafe fn injectable(cell: &Vmcs) -> bool {
+    // SAFETY: the caller guarantees the current VMCS; these fields are readable
+    // after any exit.
+    let (rflags, interruptibility, pending) = unsafe {
         (
             cell.read(Field::GUEST_RFLAGS).unwrap_or(0),
             cell.read(Field::GUEST_INTERRUPTIBILITY_STATE).unwrap_or(0),
+            cell.read(Field::VM_ENTRY_INTERRUPTION_INFO).unwrap_or(0),
         )
     };
-    if rflags & RFLAGS_INTERRUPT_ENABLE == 0 || interruptibility != 0 {
-        return;
-    }
-    let vector = lvt & 0xFF;
-    if vector < MIN_DELIVERABLE_VECTOR {
-        return;
-    }
-    let vector = u8::try_from(vector).unwrap_or(0);
-    let event = Interruption::inject(vector, vmx::event::Kind::External, false);
-    // SAFETY: `cell` is current; the guest is interruptible, so an external
-    // interrupt may be delivered on the next entry.
-    let _ = unsafe { cell.write(Field::VM_ENTRY_INTERRUPTION_INFO, u64::from(event.bits())) };
+    let queued = Interruption::from_bits(u32::try_from(pending & 0xFFFF_FFFF).unwrap_or(0));
+    rflags & RFLAGS_INTERRUPT_ENABLE != 0 && interruptibility == 0 && !queued.is_valid()
 }
 
 /// Logs the virtual-APIC registers the guest left behind, to show what a stuck
@@ -617,6 +664,7 @@ impl Sampler {
         space: &AddressSpace,
         registers: &Registers,
         forwarded: u64,
+        delivered: u64,
     ) -> bool {
         // SAFETY: `cell` is current; the guest instruction pointer is readable
         // after any exit.
@@ -626,7 +674,7 @@ impl Sampler {
             self.same += 1;
             if self.same >= SPIN_THRESHOLD {
                 error!(
-                    "vmxboot: the guest is spinning at rip {rip:#x} ({} quanta without moving, {forwarded} end-of-interrupts forwarded); stopping",
+                    "vmxboot: the guest is spinning at rip {rip:#x} ({} quanta without moving, {delivered} interrupts delivered, {forwarded} end-of-interrupts forwarded); stopping",
                     self.same
                 );
                 spin_report(space, registers, rip);
@@ -649,13 +697,13 @@ impl Sampler {
         }
         if self.logged >= SAMPLE_LOG_LIMIT && self.total.is_multiple_of(HEARTBEAT_QUANTA) {
             info!(
-                "vmxboot: still running at rip {rip:#x} after {} quanta, {forwarded} end-of-interrupts forwarded",
+                "vmxboot: still running at rip {rip:#x} after {} quanta, {delivered} interrupts delivered, {forwarded} end-of-interrupts forwarded",
                 self.total
             );
         }
         if self.total >= SAMPLE_BUDGET {
             error!(
-                "vmxboot: sampled {} quanta without a stop ({forwarded} end-of-interrupts forwarded); last rip {rip:#x}",
+                "vmxboot: sampled {} quanta without a stop ({delivered} interrupts delivered, {forwarded} end-of-interrupts forwarded); last rip {rip:#x}",
                 self.total
             );
             spin_report(space, registers, rip);
@@ -1004,6 +1052,25 @@ fn setup_apic(
         "vmxboot: guest APIC virtualized; accesses to {apic_page:#x} reach the virtual-APIC page, not the real controller"
     );
     Some((vapic, access))
+}
+
+/// Turns on interrupt reflection for the firmware guest and logs the outcome.
+///
+/// # Safety
+///
+/// `cell` must be the current VMCS on this processor, in VMX operation, with
+/// [`controls::program`] already run.
+unsafe fn enable_reflection(cell: &Vmcs) {
+    // SAFETY: the caller guarantees the current VMCS in VMX operation.
+    match unsafe { controls::reflect_interrupts(cell) } {
+        Ok(true) => {
+            info!("vmxboot: external interrupts exit to the host and are reflected into the guest");
+        }
+        Ok(false) => warn!(
+            "vmxboot: this processor cannot acknowledge interrupts on exit; firmware's interrupts may not reach the guest"
+        ),
+        Err(error) => error!("vmxboot: could not set up interrupt reflection: {error}"),
+    }
 }
 
 /// Programs the guest half of the current VMCS from a captured firmware save
